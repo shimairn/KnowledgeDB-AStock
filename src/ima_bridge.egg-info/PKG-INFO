@@ -1,3 +1,14 @@
+Metadata-Version: 2.4
+Name: ima-bridge
+Version: 0.3.0
+Summary: Windows-only App CDP bridge for ima official AI.
+Requires-Python: <3.12,>=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: playwright<2,>=1.52
+Requires-Dist: pydantic<3,>=2.12
+Provides-Extra: dev
+Requires-Dist: pytest<9,>=8.3; extra == "dev"
+
 # ima bridge (official web, background mode)
 
 This project keeps official ima AI and routes questions through `ima.qq.com` using Playwright persistent profile.

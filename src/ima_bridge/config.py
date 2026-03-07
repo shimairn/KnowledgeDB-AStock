@@ -46,8 +46,22 @@ class Settings:
     def screenshots_dir(self) -> Path:
         return self.artifacts_dir / "screenshots" / self.instance
 
+    @property
+    def runtime_dir(self) -> Path:
+        return self.artifacts_dir / "runtime"
 
-def get_settings(instance: str | None = None, port: int | None = None, profile_dir: str | None = None) -> Settings:
+    @property
+    def target_url_state_path(self) -> Path:
+        return self.runtime_dir / f"target-url-{self.instance}.txt"
+
+
+def get_settings(
+    instance: str | None = None,
+    port: int | None = None,
+    profile_dir: str | None = None,
+    driver_mode: str | None = None,
+    web_headless: bool | None = None,
+) -> Settings:
     selected_instance = sanitize_instance(instance or os.getenv("IMA_INSTANCE", DEFAULT_INSTANCE))
     selected_port = resolve_port(selected_instance, port)
     selected_profile = resolve_profile_dir(selected_instance, profile_dir)
@@ -57,10 +71,13 @@ def get_settings(instance: str | None = None, port: int | None = None, profile_d
         app_cdp_port=selected_port,
         managed_profile_dir=selected_profile,
         web_profile_dir=selected_web_profile,
+        driver_mode=driver_mode or os.getenv("IMA_DRIVER_MODE", "web"),
+        web_headless=(web_headless if web_headless is not None else os.getenv("IMA_WEB_HEADLESS", "1") == "1"),
     )
     settings.managed_profile_dir.mkdir(parents=True, exist_ok=True)
     settings.web_profile_dir.mkdir(parents=True, exist_ok=True)
     settings.screenshots_dir.mkdir(parents=True, exist_ok=True)
+    settings.runtime_dir.mkdir(parents=True, exist_ok=True)
     return settings
 
 
