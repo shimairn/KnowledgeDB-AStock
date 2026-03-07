@@ -1,0 +1,11 @@
+name: ima
+channels:
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - playwright>=1.52,<2
+      - pydantic>=2.12,<3
+      - pytest>=8.3,<9
+
