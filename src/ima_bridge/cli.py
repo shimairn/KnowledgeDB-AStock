@@ -6,6 +6,7 @@ import sys
 
 from ima_bridge.chat_ui import run_chat_ui
 from ima_bridge.config import get_settings
+from ima_bridge.probes import APP_DRIVER_DEPRECATION_MESSAGE
 from ima_bridge.service import IMAAskService
 
 DEFAULT_QUESTION = "\u8bf7\u7528\u4e00\u53e5\u8bdd\u4ecb\u7ecd\u8fd9\u4e2a\u77e5\u8bc6\u5e93\u3002"
@@ -15,7 +16,7 @@ EXIT_WORDS = {"exit", "quit", ":q"}
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m ima_bridge")
     parser.add_argument("--instance", default="default")
-    parser.add_argument("--driver", choices=["web", "app"], default=None)
+    parser.add_argument("--driver", choices=["web", "app"], default=None, help="driver mode; app is deprecated")
     parser.add_argument("--port", type=int, default=None)
     parser.add_argument("--profile-dir", default=None)
     parser.add_argument("--headed", action="store_true")
@@ -42,6 +43,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def print_json(payload) -> None:
     print(json.dumps(payload.model_dump(), ensure_ascii=False, indent=2))
+
+
+def warn_if_deprecated_driver(driver_mode: str) -> None:
+    if driver_mode == "app":
+        print(f"warning: {APP_DRIVER_DEPRECATION_MESSAGE}", file=sys.stderr)
 
 
 def run_start(service: IMAAskService, args: argparse.Namespace) -> int:
@@ -112,6 +118,7 @@ def main() -> int:
         driver_mode=args.driver,
         web_headless=False if args.headed else None,
     )
+    warn_if_deprecated_driver(settings.driver_mode)
     service = IMAAskService(settings=settings)
     if args.command == "health":
         result = service.health()

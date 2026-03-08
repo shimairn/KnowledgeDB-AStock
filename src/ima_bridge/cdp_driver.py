@@ -7,22 +7,9 @@ from playwright.sync_api import Browser, Locator, Page
 
 from ima_bridge.config import Settings
 from ima_bridge.errors import AskTimeoutError, ConfigMismatchError, KBNotFoundError, LoginRequiredError
+from ima_bridge.probes import APP_COMPOSER_SELECTORS, CONTENT_PREFIX, LOGIN_HINTS, LOADING_HINTS
 from ima_bridge.utils import incremental_text, timestamp_slug
 
-CONTENT_PREFIX = "\u5185\u5bb9("
-INPUT_HINT = "\u8f93\u5165#"
-LOGIN_HINTS = (
-    "\u626b\u7801",
-    "\u5fae\u4fe1\u767b\u5f55",
-    "\u767b\u5f55\u540e",
-    "\u8bf7\u5148\u767b\u5f55",
-)
-LOADING_HINTS = (
-    "\u601d\u8003\u4e2d",
-    "\u751f\u6210\u4e2d",
-    "\u56de\u7b54\u4e2d",
-    "\u52a0\u8f7d\u4e2d",
-)
 EXTENSION_PATTERN = re.compile(r"^chrome-extension://([a-z]{32})(?:/.*)?$")
 
 
@@ -130,12 +117,7 @@ class CdpAskDriver:
         page.wait_for_timeout(250)
 
     def _find_composer(self, page: Page) -> Locator | None:
-        selector_list = [
-            "textarea[placeholder*='输入#']",
-            "textarea",
-            "[contenteditable='true']",
-        ]
-        for selector in selector_list:
+        for selector in APP_COMPOSER_SELECTORS:
             locator = page.locator(selector)
             count = locator.count()
             for index in range(count):

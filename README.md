@@ -6,6 +6,7 @@ Scope of this version:
 
 - Windows only
 - Web driver as default (`--driver web`)
+- Legacy app driver (`--driver app`) is deprecated and kept only for compatibility
 - Single request per instance (no in-instance concurrency)
 - Background mode by default (`headless`)
 - First login is manual once, then profile is reused
@@ -84,7 +85,21 @@ python -m ima_bridge --instance win2 ask --question "长鑫存储上市设备敞
 - `IMA_ASK_TIMEOUT_SECONDS`: max wait for response completion
 - `IMA_CAPTURE_SCREENSHOT`: `0` by default (set `1` to enable screenshots)
 
-Legacy app CDP vars are still available, but not the default path now.
+Legacy app CDP vars are still available, but the `app` driver path is deprecated and no longer recommended for new setups.
+
+## Python API
+
+Recommended import:
+
+```python
+from ima_bridge.service import IMAAskService
+```
+
+Legacy compatibility import still works:
+
+```python
+from ima_bridge import IMAAskService
+```
 
 ## Output schema (`ask`)
 

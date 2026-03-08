@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from typing import Callable
 
-from playwright.sync_api import sync_playwright
-
-from ima_bridge.cdp_driver import CdpAskDriver
 from ima_bridge.config import Settings, get_settings
+from ima_bridge.driver_adapters import LegacyAppServiceDriver, WebServiceDriver
+from ima_bridge.driver_protocol import AskDriver
 from ima_bridge.errors import BridgeError, CaptureFailedError
+from ima_bridge.cdp_driver import CdpAskDriver
 from ima_bridge.managed_app import ManagedIMAApp
 from ima_bridge.schemas import AskResponse, HealthResponse, KnowledgeBaseIdentity, LoginResponse
 from ima_bridge.utils import now_iso
@@ -25,64 +25,100 @@ class IMAAskService:
         self.runtime = runtime or ManagedIMAApp(self.settings)
         self.driver = driver or CdpAskDriver(self.settings)
         self.web_driver = web_driver or WebAskDriver(self.settings)
+        self.ask_driver = self._resolve_driver(driver=self.driver, runtime=self.runtime, web_driver=self.web_driver)
+
+    def _resolve_driver(
+        self,
+        driver: CdpAskDriver | AskDriver,
+        runtime: ManagedIMAApp,
+        web_driver: WebAskDriver,
+    ) -> AskDriver:
+        if hasattr(driver, "health") and hasattr(driver, "login"):
+            return driver  # type: ignore[return-value]
+        if self.settings.driver_mode == "web":
+            return WebServiceDriver(settings=self.settings, web_driver=web_driver)
+        return LegacyAppServiceDriver(
+            settings=self.settings,
+            runtime=runtime,
+            driver=driver if isinstance(driver, CdpAskDriver) else None,
+            login_driver=WebServiceDriver(settings=self.settings, web_driver=web_driver),
+        )
 
     def health(self) -> HealthResponse:
-        if self.settings.driver_mode == "web":
-            with sync_playwright() as playwright:
-                ok, error_code, error_message = self.web_driver.health(playwright, headless=self.settings.web_headless)
+        try:
+            status = self.ask_driver.health()
             return HealthResponse(
-                ok=ok,
+                ok=status.ok,
                 instance=self.settings.instance,
-                source_driver="web",
-                base_url=self.settings.web_base_url,
-                profile_dir=str(self.settings.web_profile_dir.resolve()),
-                headless=self.settings.web_headless,
-                managed_profile_dir=str(self.settings.managed_profile_dir.resolve()),
-                error_code=error_code,
-                error_message=error_message,
+                source_driver=status.source_driver,
+                cdp_port=status.cdp_port,
+                cdp_endpoint=status.cdp_endpoint,
+                cdp_ready=status.cdp_ready,
+                base_url=status.base_url,
+                profile_dir=status.profile_dir,
+                headless=status.headless,
+                app_executable=status.app_executable,
+                managed_profile_dir=status.managed_profile_dir or str(self.settings.managed_profile_dir.resolve()),
+                error_code=status.error_code,
+                error_message=status.error_message,
             )
-
-        cdp_ready, endpoint = self.runtime.status()
-        return HealthResponse(
-            ok=cdp_ready,
-            instance=self.settings.instance,
-            source_driver="app",
-            cdp_port=self.settings.app_cdp_port,
-            cdp_endpoint=endpoint,
-            cdp_ready=cdp_ready,
-            app_executable=self.settings.app_executable,
-            managed_profile_dir=str(self.settings.managed_profile_dir.resolve()),
-            error_code=None if cdp_ready else "CAPTURE_FAILED",
-            error_message=None if cdp_ready else "CDP endpoint is not reachable yet",
-        )
+        except BridgeError as exc:
+            return HealthResponse(
+                ok=False,
+                instance=self.settings.instance,
+                source_driver="web" if self.settings.driver_mode == "web" else "app",
+                managed_profile_dir=str(self.settings.managed_profile_dir.resolve()),
+                error_code=exc.error_code,
+                error_message=exc.message,
+            )
+        except Exception as exc:
+            fallback = CaptureFailedError(str(exc))
+            return HealthResponse(
+                ok=False,
+                instance=self.settings.instance,
+                source_driver="web" if self.settings.driver_mode == "web" else "app",
+                managed_profile_dir=str(self.settings.managed_profile_dir.resolve()),
+                error_code=fallback.error_code,
+                error_message=fallback.message,
+            )
 
     def login(self, timeout_seconds: float | None = None) -> LoginResponse:
         timeout = timeout_seconds if timeout_seconds is not None else self.settings.login_timeout_seconds
-        base = LoginResponse(
-            ok=False,
-            instance=self.settings.instance,
-            base_url=self.settings.web_base_url,
-            profile_dir=str(self.settings.web_profile_dir.resolve()),
-            timeout_seconds=timeout,
-            captured_at=now_iso(),
-        )
         try:
-            with sync_playwright() as playwright:
-                ok, error_code, error_message = self.web_driver.login(playwright, timeout_seconds=timeout)
-            return base.model_copy(
-                update={
-                    "ok": ok,
-                    "error_code": error_code,
-                    "error_message": error_message,
-                    "captured_at": now_iso(),
-                }
+            status = self.ask_driver.login(timeout_seconds=timeout)
+            return LoginResponse(
+                ok=status.ok,
+                instance=self.settings.instance,
+                source_driver="web",
+                base_url=status.base_url or self.settings.web_base_url,
+                profile_dir=status.profile_dir or str(self.settings.web_profile_dir.resolve()),
+                timeout_seconds=status.timeout_seconds or timeout,
+                captured_at=now_iso(),
+                error_code=status.error_code,
+                error_message=status.error_message,
             )
         except BridgeError as exc:
-            return base.model_copy(update={"error_code": exc.error_code, "error_message": exc.message, "captured_at": now_iso()})
+            return LoginResponse(
+                ok=False,
+                instance=self.settings.instance,
+                base_url=self.settings.web_base_url,
+                profile_dir=str(self.settings.web_profile_dir.resolve()),
+                timeout_seconds=timeout,
+                captured_at=now_iso(),
+                error_code=exc.error_code,
+                error_message=exc.message,
+            )
         except Exception as exc:
             fallback = CaptureFailedError(str(exc))
-            return base.model_copy(
-                update={"error_code": fallback.error_code, "error_message": fallback.message, "captured_at": now_iso()}
+            return LoginResponse(
+                ok=False,
+                instance=self.settings.instance,
+                base_url=self.settings.web_base_url,
+                profile_dir=str(self.settings.web_profile_dir.resolve()),
+                timeout_seconds=timeout,
+                captured_at=now_iso(),
+                error_code=fallback.error_code,
+                error_message=fallback.message,
             )
 
     def ask_with_updates(
@@ -101,33 +137,15 @@ class IMAAskService:
             captured_at=now_iso(),
         )
         try:
-            if self.settings.driver_mode == "web":
-                with sync_playwright() as playwright:
-                    if on_update is None:
-                        answer_text, answer_html, references, screenshot = self.web_driver.ask(
-                            playwright, question, headless=self.settings.web_headless
-                        )
-                    else:
-                        answer_text, answer_html, references, screenshot = self.web_driver.ask_stream(
-                            playwright,
-                            question,
-                            headless=self.settings.web_headless,
-                            on_update=on_update,
-                        )
-            else:
-                endpoint = self.runtime.ensure_ready()
-                with sync_playwright() as playwright:
-                    browser = playwright.chromium.connect_over_cdp(endpoint)
-                    answer_text, answer_html, references, screenshot = self.driver.ask(browser, question)
-                if on_update is not None and answer_text:
-                    on_update(answer_text, answer_text)
+            result = self.ask_driver.ask(question=question, on_update=on_update)
             return base.model_copy(
                 update={
                     "ok": True,
-                    "answer_text": answer_text,
-                    "answer_html": answer_html,
-                    "references": references,
-                    "screenshot_path": screenshot,
+                    "source_driver": result.source_driver,
+                    "answer_text": result.answer_text,
+                    "answer_html": result.answer_html,
+                    "references": result.references,
+                    "screenshot_path": result.screenshot_path,
                     "captured_at": now_iso(),
                     "error_code": None,
                     "error_message": None,

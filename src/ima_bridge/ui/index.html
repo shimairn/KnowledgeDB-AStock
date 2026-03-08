@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ima 对话</title>
+  <link rel="stylesheet" href="/assets/app.css" />
+</head>
+<body>
+  <div class="app">
+    <div class="top">
+      <div class="title">
+        <b>ima 官方 AI 对话</b>
+        <span>固定知识库：__KB_LABEL__</span>
+      </div>
+      <div class="actions">
+        <div class="badge"><span id="statusDot" class="dot"></span><span id="statusText">检测中...</span></div>
+        <button id="loginBtn">登录</button>
+        <button id="clearBtn">清空</button>
+      </div>
+    </div>
+
+    <div class="chat" id="chat"></div>
+
+    <form class="composer" id="form">
+      <textarea id="question" placeholder="输入问题，Enter 发送，Shift+Enter 换行"></textarea>
+      <button class="send" id="sendBtn" type="submit">发送</button>
+    </form>
+  </div>
+
+  <script src="/assets/app.js"></script>
+</body>
+</html>
