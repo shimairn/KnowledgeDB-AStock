@@ -1,4 +1,4 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
@@ -8,64 +8,41 @@
 </head>
 <body>
   <div class="app-shell">
-    <header class="topbar">
-      <div class="topbar-copy">
-        <p class="eyebrow">ima-bridge</p>
-        <h1>匿名公网问答</h1>
-        <p class="subtitle">固定知识库：<span id="kbLabel">加载中...</span></p>
-      </div>
-      <div class="topbar-actions">
-        <div class="status-badge" role="status" aria-live="polite" aria-atomic="true">
-          <span id="statusDot" class="dot"></span>
-          <span id="statusText">初始化中...</span>
+    <header class="app-header">
+      <div class="app-header-inner">
+        <div class="header-copy">
+          <p class="eyebrow">ima-bridge</p>
+          <h1>匿名公网问答</h1>
+          <p class="subtitle">仅保留当前页临时对话；刷新或新开窗口都会重新开始。</p>
         </div>
-        <button id="clearBtn" type="button">清空对话</button>
+
+        <div class="header-actions">
+          <div class="status-badge" role="status" aria-live="polite" aria-atomic="true">
+            <span id="statusDot" class="dot"></span>
+            <span id="statusText">初始化中...</span>
+          </div>
+          <button id="clearBtn" type="button">清空对话</button>
+        </div>
       </div>
     </header>
 
-    <main class="layout">
-      <aside class="info-panel" aria-label="服务信息">
-        <section class="info-card info-card--status">
-          <div class="info-card-header">
-            <h2>服务状态</h2>
-            <span class="mini-tag">多 worker</span>
-          </div>
-          <p id="poolSummary">正在读取 worker 池状态...</p>
-        </section>
-
-        <section class="info-card">
-          <div class="info-card-header">
-            <h2>使用说明</h2>
-            <span class="mini-tag">匿名直连</span>
-          </div>
-          <ul>
-            <li>打开页面后即可直接提问，无需登录。</li>
-            <li>回答会拆分为摘要、富文本和原文引用，表格会保留结构化展示。</li>
-            <li>带链接的来源支持侧边抽屉预览，也可直接在新标签真实打开原文。</li>
-            <li>若容量不足会返回 <code>BUSY</code>，频率过高会返回 <code>RATE_LIMITED</code>。</li>
-          </ul>
-        </section>
-      </aside>
-
-      <section class="chat-panel" aria-label="问答区域">
-        <div class="chat-panel-header">
-          <div>
-            <p class="chat-kicker">Question & Sources</p>
-            <h2>问题与引用</h2>
-          </div>
-          <p class="chat-caption">当回答包含表格、富文本或引用来源时，会自动整理成更易读的卡片，并支持侧边预览原文。</p>
-        </div>
+    <main class="chat-stage">
+      <section class="chat-column" aria-label="问答区域">
         <div id="chat" class="chat-log" role="log" aria-live="polite"></div>
       </section>
     </main>
 
     <form id="composer" class="composer">
-      <label class="composer-title" for="question">请输入问题</label>
-      <textarea id="question" rows="4" placeholder="Enter 发送，Shift+Enter 换行" aria-describedby="questionHint questionMeta"></textarea>
-      <div class="composer-footer">
-        <span id="questionHint" class="hint">匿名模式可直接提问；若回答包含表格或来源链接，界面会自动整理出原文引用区，并支持侧边抽屉预览。</span>
-        <span id="questionMeta" class="meta">0 字</span>
-        <button id="sendBtn" class="primary" type="submit">发送</button>
+      <div class="composer-card">
+        <label class="composer-title" for="question">请输入问题</label>
+        <textarea id="question" rows="4" placeholder="Enter 发送，Shift+Enter 换行" aria-describedby="questionHint questionMeta"></textarea>
+        <div class="composer-footer">
+          <div class="composer-meta">
+            <span id="questionHint" class="hint">支持连续提问；长时间无操作会自动清理当前页内容。</span>
+            <span id="questionMeta" class="meta">0 字</span>
+          </div>
+          <button id="sendBtn" class="primary" type="submit">发送</button>
+        </div>
       </div>
     </form>
   </div>
@@ -80,10 +57,12 @@
       </div>
       <button id="drawerCloseBtn" class="drawer-close" type="button" aria-label="关闭原文预览">关闭</button>
     </div>
+
     <div class="source-drawer-toolbar">
       <a id="sourceDrawerOpenLink" class="source-link source-link--primary is-disabled" href="about:blank" target="_blank" rel="noreferrer" aria-disabled="true" tabindex="-1">打开原文</a>
       <span id="sourceDrawerStatus" class="drawer-status">部分站点可能禁止嵌入预览；如未显示，请直接打开原文。</span>
     </div>
+
     <div class="source-drawer-frame-wrap">
       <iframe id="sourceDrawerFrame" class="source-drawer-frame" title="原文侧边预览" loading="lazy" referrerpolicy="no-referrer"></iframe>
     </div>

@@ -115,24 +115,46 @@ def run_login_pool(settings, args: argparse.Namespace) -> int:
         return 2
 
     worker_count = args.workers if args.workers is not None else settings.ui_worker_count
+    source_service = IMAAskService(settings=settings)
+    source_login = source_service.login(timeout_seconds=args.timeout)
+    if not source_login.ok:
+        print_json(
+            {
+                "ok": False,
+                "workers_total": worker_count,
+                "source_instance": settings.instance,
+                "source_login": source_login.model_dump(),
+                "workers": [],
+            }
+        )
+        return 1
+
     pool_manager = WorkerPoolManager(template_settings=settings, worker_count=worker_count)
+    seeded = pool_manager.seed_profiles_from(settings)
+    pool_manager.refresh_all()
 
     results: list[dict] = []
     all_ok = True
     for worker in pool_manager.iter_login_services():
-        result = worker.service.login(timeout_seconds=args.timeout)
-        pool_manager.refresh_worker(worker)
-        payload = result.model_dump()
-        payload["worker_id"] = worker.worker_id
-        payload["worker_status"] = worker.status
+        payload = {
+            "worker_id": worker.worker_id,
+            "instance": worker.settings.instance,
+            "profile_dir": str(worker.settings.web_profile_dir.resolve()),
+            "worker_status": worker.status,
+            "error_code": worker.last_error_code,
+            "error_message": worker.last_error_message,
+        }
         results.append(payload)
-        if not result.ok:
+        if worker.status != "ready":
             all_ok = False
 
     print_json(
         {
             "ok": all_ok,
             "workers_total": worker_count,
+            "source_instance": settings.instance,
+            "source_login": source_login.model_dump(),
+            "seeded_workers": seeded,
             "workers": results,
         }
     )

@@ -24,35 +24,52 @@ def _make_settings(tmp_path, monkeypatch, **kwargs):
     return get_settings(instance="ui-test", driver_mode="web")
 
 
-def _make_ask_response(question: str, *, ok: bool = True) -> AskResponse:
-    kb = KnowledgeBaseIdentity(name="爱分享", owner="购物小助手", title="【爱分享】的财经资讯")
+def _make_ask_response(
+    question: str,
+    *,
+    ok: bool = True,
+    answer_text: str = "final",
+    answer_html: str = "<p>final</p>",
+    thinking_text: str = "",
+) -> AskResponse:
+    kb = KnowledgeBaseIdentity(name="Knowledge", owner="Assistant", title="Knowledge Base")
     return AskResponse(
         ok=ok,
         question=question,
         knowledge_base=kb,
-        mode="对话模式",
+        mode="chat",
         model="DS V3.2 T",
         source_driver="web",
-        answer_text="final",
-        answer_html="<p>final</p>",
+        thinking_text=thinking_text,
+        answer_text=answer_text,
+        answer_html=answer_html,
         error_code=None if ok else "LOGIN_REQUIRED",
         error_message=None if ok else "login required",
     )
 
 
 class FakeWorkerService:
-    def __init__(self, *, stream_error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        stream_error: Exception | None = None,
+        stream_updates: list[tuple[str, str, str]] | None = None,
+        response: AskResponse | None = None,
+    ) -> None:
         self.stream_error = stream_error
+        self.stream_updates = stream_updates or [("answer", "chunk", "full chunk")]
+        self.response = response
 
     def ask(self, question: str) -> AskResponse:
-        return _make_ask_response(question)
+        return self.response or _make_ask_response(question)
 
     def ask_with_updates(self, question: str, on_update=None) -> AskResponse:
+        if on_update is not None:
+            for update in self.stream_updates:
+                on_update(*update)
         if self.stream_error is not None:
             raise self.stream_error
-        if on_update is not None:
-            on_update("片段", "完整片段")
-        return _make_ask_response(question)
+        return self.response or _make_ask_response(question)
 
     def login(self, timeout_seconds: float | None = None) -> LoginResponse:
         return LoginResponse(
@@ -122,9 +139,10 @@ def test_chat_ui_serves_static_index_and_assets(tmp_path, monkeypatch):
     js_response = client.get("/assets/app.js")
 
     assert index_response.status_code == 200
-    assert "id=\"kbLabel\"" in index_response.text
+    assert "id=\"statusText\"" in index_response.text
+    assert "id=\"poolSummary\"" not in index_response.text
     assert js_response.status_code == 200
-    assert "/api/ui-config" in js_response.text
+    assert "/api/ask-stream" in js_response.text
 
 
 def test_chat_ui_ui_config_and_health_are_anonymous(tmp_path, monkeypatch):
@@ -166,7 +184,7 @@ def test_chat_ui_stream_success_sequence(tmp_path, monkeypatch):
     index_response = client.get("/")
     config_response = client.get("/api/ui-config")
     health_response = client.get("/api/health")
-    with client.stream("POST", "/api/ask-stream", json={"question": "你好"}) as response:
+    with client.stream("POST", "/api/ask-stream", json={"question": "hello"}) as response:
         events = [json.loads(line) for line in response.iter_lines() if line]
 
     assert index_response.status_code == 200
@@ -175,6 +193,59 @@ def test_chat_ui_stream_success_sequence(tmp_path, monkeypatch):
     assert response.status_code == 200
     assert [event["type"] for event in events] == ["start", "delta", "done"]
     assert events[-1]["response"]["answer_html"] == "<p>final</p>"
+    assert events[-1]["response"]["thinking_text"] == ""
+
+
+def test_chat_ui_stream_emits_thinking_and_done_payload(tmp_path, monkeypatch):
+    settings = _make_settings(tmp_path, monkeypatch)
+    service = type("Service", (), {"settings": settings})()
+    worker = type(
+        "Worker",
+        (),
+        {
+            "worker_id": "worker-01",
+            "service": FakeWorkerService(
+                stream_updates=[
+                    ("thinking", "thought", "thought"),
+                    ("thinking", " more", "thought more"),
+                    ("answer", "answer", "answer"),
+                ],
+                response=_make_ask_response("hello", answer_text="answer", thinking_text="thought more"),
+            ),
+        },
+    )()
+    client = TestClient(create_chat_ui_app(service=service, pool_manager=FakePoolManager(worker=worker)))
+
+    with client.stream("POST", "/api/ask-stream", json={"question": "hello"}) as response:
+        events = [json.loads(line) for line in response.iter_lines() if line]
+
+    assert response.status_code == 200
+    assert [event["type"] for event in events] == ["start", "thinking_delta", "thinking_delta", "delta", "done"]
+    assert events[-1]["response"]["thinking_text"] == "thought more"
+
+
+def test_chat_ui_stream_error_after_thinking_emits_error(tmp_path, monkeypatch):
+    settings = _make_settings(tmp_path, monkeypatch)
+    service = type("Service", (), {"settings": settings})()
+    worker = type(
+        "Worker",
+        (),
+        {
+            "worker_id": "worker-01",
+            "service": FakeWorkerService(
+                stream_updates=[("thinking", "thought", "thought")],
+                stream_error=RuntimeError("boom"),
+            ),
+        },
+    )()
+    client = TestClient(create_chat_ui_app(service=service, pool_manager=FakePoolManager(worker=worker)))
+
+    with client.stream("POST", "/api/ask-stream", json={"question": "hello"}) as response:
+        events = [json.loads(line) for line in response.iter_lines() if line]
+
+    assert response.status_code == 200
+    assert [event["type"] for event in events] == ["start", "thinking_delta", "error"]
+    assert events[-1]["error_code"] == "CAPTURE_FAILED"
 
 
 def test_chat_ui_busy_returns_429(tmp_path, monkeypatch):
@@ -208,7 +279,7 @@ def test_chat_ui_busy_returns_429(tmp_path, monkeypatch):
     )
     client = TestClient(create_chat_ui_app(service=service, pool_manager=pool))
 
-    response = client.post("/api/ask-stream", json={"question": "你好"})
+    response = client.post("/api/ask-stream", json={"question": "hello"})
 
     assert response.status_code == 429
     assert response.json()["error_code"] == "BUSY"

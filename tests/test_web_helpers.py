@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from ima_bridge._web.answer_extractor import WebAnswerExtractor
+from ima_bridge._web.conversation import WebConversationRunner
 from ima_bridge._web.knowledge_base import WebKnowledgeBaseNavigator
 from ima_bridge._web.session import WebSession
 from ima_bridge.config import get_settings
-from ima_bridge.probes import GENERIC_TARGET_URL_PATHS
+from ima_bridge.probes import CONTENT_PREFIX, GENERIC_TARGET_URL_PATHS, INPUT_HINT
 from ima_bridge.target_state import TargetStateStore
 
 
@@ -40,3 +41,49 @@ def test_answer_extractor_helpers(tmp_path, monkeypatch):
     assert extractor.extract_class_names('<div class="alpha beta"></div><span class="beta gamma"></span>') == ["alpha", "beta", "gamma"]
     assert extractor.extract_references("正文\n[1] 引用一\n[2] 引用二") == ["[1] 引用一", "[2] 引用二"]
 
+
+
+def test_target_signals_allow_name_owner_without_full_title(tmp_path, monkeypatch):
+    settings, navigator, _ = build_components(tmp_path, monkeypatch)
+    body = f"{settings.kb_name}\n{settings.kb_owner}\n{CONTENT_PREFIX}5)\n{INPUT_HINT}??"
+
+    assert settings.kb_title not in body
+    assert navigator.has_target_signals(body) is True
+
+
+def test_login_required_detection_matches_login_cta(tmp_path, monkeypatch):
+    _, navigator, _ = build_components(tmp_path, monkeypatch)
+
+    assert navigator.is_login_required("登录一下，即可开启你的专属知识库") is True
+    assert navigator.is_login_required("登录以同步历史会话") is True
+
+
+
+def test_conversation_runner_allows_hidden_model_badge(tmp_path, monkeypatch):
+    settings, _, extractor = build_components(tmp_path, monkeypatch)
+    session = WebSession(settings)
+    runner = WebConversationRunner(settings=settings, session=session, extractor=extractor)
+
+    class DummyPage:
+        pass
+
+    page = DummyPage()
+    runner.session = type("Session", (), {"body_text": lambda self, page: settings.mode_name})()
+    runner.find_composer = lambda page: None
+
+    runner.ensure_mode_model(page)
+
+
+def test_conversation_runner_allows_composer_without_mode_label(tmp_path, monkeypatch):
+    settings, _, extractor = build_components(tmp_path, monkeypatch)
+    session = WebSession(settings)
+    runner = WebConversationRunner(settings=settings, session=session, extractor=extractor)
+
+    class DummyPage:
+        pass
+
+    page = DummyPage()
+    runner.session = type("Session", (), {"body_text": lambda self, page: ""})()
+    runner.find_composer = lambda page: object()
+
+    runner.ensure_mode_model(page)

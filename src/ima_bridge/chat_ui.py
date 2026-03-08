@@ -70,6 +70,30 @@ def _resolve_client_ip(request: Request, settings: Settings) -> str:
     return client or "unknown"
 
 
+def _normalize_stream_update(*args: Any, **kwargs: Any) -> tuple[str, str, str]:
+    if kwargs:
+        phase = str(kwargs.get("phase") or "answer")
+        delta = str(kwargs.get("delta") or "")
+        text = str(kwargs.get("text") or "")
+        return phase, delta, text
+
+    if len(args) == 1 and isinstance(args[0], dict):
+        payload = args[0]
+        return (
+            str(payload.get("phase") or "answer"),
+            str(payload.get("delta") or ""),
+            str(payload.get("text") or ""),
+        )
+
+    if len(args) >= 3:
+        return str(args[0] or "answer"), str(args[1] or ""), str(args[2] or "")
+
+    if len(args) >= 2:
+        return "answer", str(args[0] or ""), str(args[1] or "")
+
+    raise ValueError("Unsupported stream update payload")
+
+
 def _build_stream(
     worker: WorkerSlot,
     pool_manager: WorkerPoolManager,
@@ -84,10 +108,12 @@ def _build_stream(
         try:
             events.put({"type": "start", "question": question})
 
-            def on_update(delta: str, text: str) -> None:
+            def on_update(*args: Any, **kwargs: Any) -> None:
+                phase, delta, text = _normalize_stream_update(*args, **kwargs)
                 if not delta:
                     return
-                events.put({"type": "delta", "delta": delta, "text": text})
+                event_type = "thinking_delta" if phase == "thinking" else "delta"
+                events.put({"type": event_type, "delta": delta, "text": text})
 
             response = worker.service.ask_with_updates(question=question, on_update=on_update)
             pool_manager.release(worker, response=response)
@@ -142,7 +168,7 @@ def create_chat_ui_app(
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> HTMLResponse:
-        return HTMLResponse(assets["index.html"])
+        return HTMLResponse(assets["index.html"], headers={"Cache-Control": "no-store"})
 
     @app.get("/assets/app.css")
     def asset_css() -> Response:
@@ -246,6 +272,7 @@ def run_chat_ui(
         template_settings=service.settings,
         worker_count=workers if workers is not None else service.settings.ui_worker_count,
     )
+    pool_manager.seed_profiles_from(service.settings)
     pool_manager.refresh_all()
     app = create_chat_ui_app(service=service, pool_manager=pool_manager)
 

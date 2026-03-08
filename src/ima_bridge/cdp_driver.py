@@ -90,10 +90,11 @@ class CdpAskDriver:
 
     def _ensure_mode_model(self, page: Page) -> None:
         text = self._body_text(page)
-        if self.settings.mode_name not in text:
-            raise ConfigMismatchError(f"Expected mode not visible: {self.settings.mode_name}")
-        if self.settings.model_prefix not in text:
-            raise ConfigMismatchError(f"Expected model prefix not visible: {self.settings.model_prefix}")
+        if self.settings.mode_name in text:
+            return
+        if self._find_composer(page) is not None:
+            return
+        raise ConfigMismatchError(f"Expected mode not visible: {self.settings.mode_name}")
 
     def _submit_question(self, page: Page, question: str) -> None:
         if not question.strip():

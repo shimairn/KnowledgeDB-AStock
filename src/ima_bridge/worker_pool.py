@@ -6,6 +6,7 @@ from threading import Lock
 from typing import Callable, Literal
 
 from ima_bridge.config import Settings, get_settings
+from ima_bridge.profile_sync import sync_profile_state
 from ima_bridge.schemas import AskResponse, HealthResponse
 from ima_bridge.service import IMAAskService
 
@@ -163,6 +164,17 @@ class WorkerPoolManager:
 
     def iter_login_services(self) -> list[WorkerSlot]:
         return list(self._workers)
+
+    def seed_profiles_from(self, source_settings: Settings | None = None) -> int:
+        source = source_settings or self.template_settings
+        seeded = 0
+        for worker in self._workers:
+            if sync_profile_state(source, worker.settings):
+                worker.status = "error"
+                worker.last_error_code = None
+                worker.last_error_message = None
+                seeded += 1
+        return seeded
 
     @staticmethod
     def _status_from_health(health: HealthResponse) -> WorkerStatus:

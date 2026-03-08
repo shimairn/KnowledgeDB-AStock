@@ -1,12 +1,10 @@
-﻿const chat = document.getElementById("chat");
+const chat = document.getElementById("chat");
 const questionEl = document.getElementById("question");
 const composer = document.getElementById("composer");
 const sendBtn = document.getElementById("sendBtn");
 const clearBtn = document.getElementById("clearBtn");
 const statusDot = document.getElementById("statusDot");
 const statusText = document.getElementById("statusText");
-const kbLabel = document.getElementById("kbLabel");
-const poolSummary = document.getElementById("poolSummary");
 const questionMeta = document.getElementById("questionMeta");
 const drawerBackdrop = document.getElementById("drawerBackdrop");
 const sourceDrawer = document.getElementById("sourceDrawer");
@@ -17,12 +15,14 @@ const sourceDrawerOpenLink = document.getElementById("sourceDrawerOpenLink");
 const sourceDrawerFrame = document.getElementById("sourceDrawerFrame");
 const drawerCloseBtn = document.getElementById("drawerCloseBtn");
 
-const INTRO_MESSAGE = "服务已连接，可直接提问。匿名模式下无需登录。";
+const INTRO_MESSAGE = "服务已连接，可直接提问。对话仅在当前页临时保留，长时间无操作会自动清理。";
 const HTML_BASE_URL = "https://ima.qq.com/";
 const HTML_PARSER = new DOMParser();
+const AUTO_CLEAR_MS = 15 * 60 * 1000;
 
 let isBusy = false;
 let lastDrawerTrigger = null;
+let autoClearTimer = 0;
 
 function scrollChatToBottom() {
   requestAnimationFrame(() => {
@@ -30,14 +30,22 @@ function scrollChatToBottom() {
   });
 }
 
-function visibleMessageCount() {
-  return chat.querySelectorAll(".msg").length;
+function historyMessageCount() {
+  return chat.querySelectorAll(".msg:not(.is-intro)").length;
+}
+
+function syncIntroState() {
+  const intro = chat.querySelector(".msg.is-intro");
+  if (intro) {
+    intro.hidden = historyMessageCount() > 0;
+  }
 }
 
 function syncComposerState() {
   questionMeta.textContent = `${questionEl.value.length} 字`;
   sendBtn.disabled = isBusy || !questionEl.value.trim();
-  clearBtn.disabled = isBusy || visibleMessageCount() <= 1;
+  clearBtn.disabled = isBusy || historyMessageCount() === 0;
+  syncIntroState();
 }
 
 function setBusy(value) {
@@ -50,33 +58,62 @@ function setStatus(kind, text) {
   statusText.textContent = text;
 }
 
-function summarizePool(pool) {
-  if (!pool) {
-    return "未获取到 worker 池信息";
+function clearConversation(options = {}) {
+  const { focus = true } = options;
+  closeSourceDrawer({ restoreFocus: false });
+  chat.innerHTML = "";
+  questionEl.value = "";
+  appendIntroMessage();
+  syncComposerState();
+  if (focus) {
+    questionEl.focus();
   }
-  return `总数 ${pool.workers_total} / 空闲 ${pool.workers_ready} / 忙碌 ${pool.workers_busy} / 需登录 ${pool.workers_login_required} / 异常 ${pool.workers_error}`;
+}
+
+function scheduleAutoClear() {
+  if (autoClearTimer) {
+    window.clearTimeout(autoClearTimer);
+  }
+  autoClearTimer = window.setTimeout(() => {
+    if (isBusy) {
+      scheduleAutoClear();
+      return;
+    }
+    if (historyMessageCount() > 0 || questionEl.value.trim()) {
+      clearConversation({ focus: false });
+    }
+    scheduleAutoClear();
+  }, AUTO_CLEAR_MS);
+}
+
+function noteActivity() {
+  scheduleAutoClear();
 }
 
 function setHealthStatus(payload) {
-  poolSummary.textContent = summarizePool(payload.pool);
   if (payload.ok) {
     setStatus("ready", "可直接提问");
     return;
   }
   if (payload.error_code === "BUSY") {
-    setStatus("busy", "当前容量已满，请稍后重试");
+    setStatus("busy", "服务繁忙，请稍后重试");
     return;
   }
   if (payload.error_code === "LOGIN_REQUIRED") {
-    setStatus("error", "部分 worker 需要管理员重新登录");
+    setStatus("error", "请先完成登录");
     return;
   }
-  setStatus("error", "服务存在异常 worker");
+  if (payload.error_code === "KB_NOT_FOUND") {
+    setStatus("error", "未找到目标知识库");
+    return;
+  }
+  setStatus("error", "服务连接异常");
 }
 
 function setDrawerVisibility(visible) {
   sourceDrawer.setAttribute("aria-hidden", String(!visible));
   document.body.classList.toggle("drawer-open", visible);
+
   if (visible) {
     sourceDrawer.hidden = false;
     drawerBackdrop.hidden = false;
@@ -119,7 +156,17 @@ function closeSourceDrawer(options = {}) {
   lastDrawerTrigger = null;
 }
 
+function formatSourceHost(href) {
+  try {
+    const url = new URL(href);
+    return `${url.hostname}${url.pathname}`;
+  } catch (_) {
+    return href;
+  }
+}
+
 function openSourceDrawer(source, trigger = null) {
+  noteActivity();
   if (!source?.href) {
     return;
   }
@@ -142,9 +189,9 @@ function openSourceDrawer(source, trigger = null) {
   setTimeout(() => drawerCloseBtn.focus(), 0);
 }
 
-function appendMessage(role, text) {
+function createMessageRow(role, extraClass = "") {
   const row = document.createElement("article");
-  row.className = `msg ${role}`;
+  row.className = `msg ${role}${extraClass ? ` ${extraClass}` : ""}`;
 
   const avatar = document.createElement("div");
   avatar.className = `avatar ${role}`;
@@ -153,32 +200,223 @@ function appendMessage(role, text) {
   const bubble = document.createElement("div");
   bubble.className = "bubble";
 
-  const body = document.createElement("div");
-  body.className = "bubble-text";
-  body.textContent = text || "";
-
-  bubble.appendChild(body);
   row.appendChild(avatar);
   row.appendChild(bubble);
   chat.appendChild(row);
   syncComposerState();
   scrollChatToBottom();
+
+  return { row, bubble };
+}
+
+function appendUserMessage(text) {
+  const { bubble } = createMessageRow("user");
+  const body = document.createElement("div");
+  body.className = "bubble-text";
+  body.textContent = text || "";
+  bubble.appendChild(body);
   return bubble;
 }
 
-function setBubbleText(bubble, text) {
-  const body = bubble.querySelector(".bubble-text");
-  if (body) {
-    body.textContent = text || "";
+function createChip(text) {
+  const chip = document.createElement("span");
+  chip.className = "meta-chip";
+  chip.textContent = text;
+  return chip;
+}
+
+function createAssistantView({ intro = false } = {}) {
+  const { row, bubble } = createMessageRow("assistant", intro ? "is-intro" : "");
+  const main = document.createElement("div");
+  main.className = "bubble-main";
+
+  const body = document.createElement("div");
+  body.className = "bubble-text";
+  main.appendChild(body);
+
+  const extras = document.createElement("div");
+  extras.className = "bubble-extras";
+
+  bubble.appendChild(main);
+  bubble.appendChild(extras);
+
+  let mainText = "";
+  let thinkingText = "";
+  let mainFrame = 0;
+  let thinkingFrame = 0;
+  let metaRow = null;
+  let thinkingDetails = null;
+  let thinkingPre = null;
+  let thinkingState = null;
+  let detailStack = null;
+
+  function queueMainText(value) {
+    mainText = String(value || "");
+    if (mainFrame) {
+      return;
+    }
+    mainFrame = requestAnimationFrame(() => {
+      mainFrame = 0;
+      body.textContent = mainText;
+      scrollChatToBottom();
+    });
   }
+
+  function setMainText(value) {
+    mainText = String(value || "");
+    body.textContent = mainText;
+  }
+
+  function removeMeta() {
+    if (metaRow) {
+      metaRow.remove();
+      metaRow = null;
+    }
+  }
+
+  function setMeta(texts) {
+    const labels = Array.isArray(texts) ? texts.filter(Boolean) : [];
+    if (!labels.length) {
+      removeMeta();
+      return;
+    }
+
+    if (!metaRow) {
+      metaRow = document.createElement("div");
+      metaRow.className = "bubble-meta";
+      extras.appendChild(metaRow);
+    }
+
+    metaRow.innerHTML = "";
+    labels.forEach((label) => metaRow.appendChild(createChip(label)));
+  }
+
+  function removeThinking() {
+    if (thinkingDetails) {
+      thinkingDetails.remove();
+      thinkingDetails = null;
+      thinkingPre = null;
+      thinkingState = null;
+      thinkingText = "";
+    }
+  }
+
+  function ensureThinking() {
+    if (thinkingDetails) {
+      return;
+    }
+
+    thinkingDetails = document.createElement("details");
+    thinkingDetails.className = "thinking-card";
+
+    const summary = document.createElement("summary");
+    const copy = document.createElement("div");
+    copy.className = "thinking-copy";
+
+    const title = document.createElement("span");
+    title.className = "thinking-title";
+    title.textContent = "思考过程";
+
+    const caption = document.createElement("span");
+    caption.className = "thinking-caption";
+    caption.textContent = "默认折叠展示，避免打断阅读。";
+
+    thinkingState = document.createElement("span");
+    thinkingState.className = "thinking-state";
+    thinkingState.textContent = "思考中…";
+
+    copy.appendChild(title);
+    copy.appendChild(caption);
+    summary.appendChild(copy);
+    summary.appendChild(thinkingState);
+
+    const thinkingBody = document.createElement("div");
+    thinkingBody.className = "thinking-body";
+    thinkingPre = document.createElement("pre");
+    thinkingPre.className = "thinking-pre";
+    thinkingBody.appendChild(thinkingPre);
+
+    thinkingDetails.appendChild(summary);
+    thinkingDetails.appendChild(thinkingBody);
+    thinkingDetails.addEventListener("toggle", scrollChatToBottom);
+    extras.appendChild(thinkingDetails);
+  }
+
+  function queueThinkingText(value, options = {}) {
+    const { streaming = false } = options;
+    const normalized = String(value || "").trim();
+    if (!normalized) {
+      if (!streaming) {
+        removeThinking();
+      }
+      return;
+    }
+
+    ensureThinking();
+    thinkingText = normalized;
+    thinkingDetails.classList.toggle("is-live", Boolean(streaming));
+    thinkingState.textContent = streaming ? "思考中…" : "已完成";
+
+    if (thinkingFrame) {
+      return;
+    }
+
+    thinkingFrame = requestAnimationFrame(() => {
+      thinkingFrame = 0;
+      if (thinkingPre) {
+        thinkingPre.textContent = thinkingText;
+      }
+      scrollChatToBottom();
+    });
+  }
+
+  function finalizeThinking(value) {
+    const normalized = String(value || thinkingText || "").trim();
+    if (!normalized) {
+      removeThinking();
+      return;
+    }
+    queueThinkingText(normalized, { streaming: false });
+  }
+
+  function setDetails(node) {
+    if (detailStack) {
+      detailStack.remove();
+      detailStack = null;
+    }
+    if (node && node.childElementCount > 0) {
+      detailStack = node;
+      extras.appendChild(detailStack);
+    }
+  }
+
+  return {
+    row,
+    bubble,
+    queueMainText,
+    setMainText,
+    setMeta,
+    queueThinkingText,
+    finalizeThinking,
+    setDetails,
+    getThinkingText: () => thinkingText,
+  };
 }
 
 function appendIntroMessage() {
-  appendMessage("assistant", INTRO_MESSAGE);
+  const view = createAssistantView({ intro: true });
+  view.setMainText(INTRO_MESSAGE);
+  return view;
 }
 
 function formatApiError(payload) {
   const code = payload?.error_code || "REQUEST_FAILED";
+  if (code === "LOGIN_REQUIRED") {
+    return "请先完成登录后再使用问答服务";
+  }
+  if (code === "KB_NOT_FOUND") {
+    return "未找到目标知识库，请确认已进入正确知识库";
+  }
   const message = payload?.error_message || "请求失败";
   return `${code}: ${message}`;
 }
@@ -276,30 +514,6 @@ function extractHtmlArtifacts(answerHtml) {
     tableCount: doc.querySelectorAll("table").length,
   };
 }
-function createChip(text) {
-  const chip = document.createElement("span");
-  chip.className = "meta-chip";
-  chip.textContent = text;
-  return chip;
-}
-
-function appendMetaRow(bubble, payload, references, artifacts) {
-  const chips = [
-    payload?.model ? createChip(payload.model) : null,
-    payload?.source_driver ? createChip(`${payload.source_driver.toUpperCase()} 驱动`) : null,
-    references.length ? createChip(`${references.length} 条引用`) : null,
-    artifacts.tableCount ? createChip(`${artifacts.tableCount} 个表格`) : null,
-  ].filter(Boolean);
-
-  if (!chips.length) {
-    return;
-  }
-
-  const row = document.createElement("div");
-  row.className = "bubble-meta";
-  chips.forEach((chip) => row.appendChild(chip));
-  bubble.appendChild(row);
-}
 
 function createDetailHeader(title, subtitle) {
   const header = document.createElement("div");
@@ -347,15 +561,6 @@ function buildSourceItems(references, artifacts) {
   return items;
 }
 
-function formatSourceHost(href) {
-  try {
-    const url = new URL(href);
-    return `${url.hostname}${url.pathname}`;
-  } catch (_) {
-    return href;
-  }
-}
-
 function appendSourceSection(container, references, artifacts) {
   const items = buildSourceItems(references, artifacts);
   if (!items.length && !references.length) {
@@ -364,7 +569,7 @@ function appendSourceSection(container, references, artifacts) {
 
   const section = document.createElement("section");
   section.className = "detail-card";
-  section.appendChild(createDetailHeader("引用原文", "把来源入口和引用片段单独整理出来，便于校对。"));
+  section.appendChild(createDetailHeader("引用原文", "来源入口和引用片段会统一收在这里，便于校对。"));
 
   if (items.length) {
     const grid = document.createElement("div");
@@ -427,6 +632,7 @@ function appendSourceSection(container, references, artifacts) {
         note.textContent = "当前仅抽取到引用条目，未发现可直接打开的链接。";
         footer.appendChild(note);
       }
+
       card.appendChild(footer);
       grid.appendChild(card);
     });
@@ -476,36 +682,52 @@ function wrapAnswerHtml(answerHtml) {
     a { color:var(--primary); text-decoration:underline; text-decoration-thickness:1.5px; text-underline-offset:3px; word-break:break-all; }
   </style></head><body>${html}</body></html>`;
 }
+
 function appendRichSection(container, answerHtml, artifacts) {
-  if (!answerHtml) {
+  const html = String(answerHtml || "").trim();
+  if (!html) {
     return;
   }
 
   const details = document.createElement("details");
   details.className = "rich-details";
-  details.open = true;
 
   const summary = document.createElement("summary");
-  const label = document.createElement("span");
-  label.textContent = artifacts.tableCount ? `富文本原文 · ${artifacts.tableCount} 个表格` : "富文本原文";
-  summary.appendChild(label);
-  details.appendChild(summary);
+  const copy = document.createElement("div");
+  copy.className = "thinking-copy";
+
+  const title = document.createElement("span");
+  title.className = "thinking-title";
+  title.textContent = "富文本内容";
+
+  const subtitle = document.createElement("span");
+  subtitle.className = "thinking-caption";
+  subtitle.textContent = artifacts.tableCount
+    ? `检测到 ${artifacts.tableCount} 个表格，保留结构化排版。`
+    : "原始富文本会在这里保留，便于核对格式。";
+
+  const state = document.createElement("span");
+  state.className = "thinking-state";
+  state.textContent = "展开";
+
+  copy.appendChild(title);
+  copy.appendChild(subtitle);
+  summary.appendChild(copy);
+  summary.appendChild(state);
 
   const body = document.createElement("div");
   body.className = "rich-details-body";
-
   const wrap = document.createElement("div");
   wrap.className = "html-wrap";
   const frame = document.createElement("iframe");
-  frame.setAttribute("sandbox", "allow-same-origin");
-  frame.setAttribute("title", "回答富文本视图");
   frame.loading = "lazy";
+  frame.referrerPolicy = "no-referrer";
   frame.srcdoc = wrapAnswerHtml(answerHtml);
 
   const resize = () => {
     try {
       const doc = frame.contentDocument;
-      if (!doc || !doc.body) {
+      if (!doc) {
         return;
       }
       const bodyHeight = doc.body.scrollHeight || 0;
@@ -522,30 +744,42 @@ function appendRichSection(container, answerHtml, artifacts) {
     setTimeout(resize, 400);
     setTimeout(resize, 1200);
   });
-  details.addEventListener("toggle", scrollChatToBottom);
+
+  details.addEventListener("toggle", () => {
+    state.textContent = details.open ? "收起" : "展开";
+    scrollChatToBottom();
+  });
 
   wrap.appendChild(frame);
   body.appendChild(wrap);
+  details.appendChild(summary);
   details.appendChild(body);
   container.appendChild(details);
 }
 
-function renderAssistantResponse(bubble, payload, streamText) {
+function renderAssistantResponse(view, payload, fallbackAnswerText, fallbackThinkingText) {
   const references = collectReferenceLines(payload);
-  const summaryText = stripReferenceLines(payload?.answer_text || "") || payload?.answer_text || streamText || "(空回答)";
-  setBubbleText(bubble, summaryText);
+  const summaryText = stripReferenceLines(payload?.answer_text || "") || payload?.answer_text || fallbackAnswerText || "(空回答)";
+  view.setMainText(summaryText);
+
+  const thinkingText = String(payload?.thinking_text || fallbackThinkingText || "").trim();
+  view.finalizeThinking(thinkingText);
 
   const artifacts = extractHtmlArtifacts(payload?.answer_html || "");
-  appendMetaRow(bubble, payload, references, artifacts);
+  const metaTexts = [];
+  if (references.length) {
+    metaTexts.push(`${references.length} 条引用`);
+  }
+  if (artifacts.tableCount) {
+    metaTexts.push(`${artifacts.tableCount} 个表格`);
+  }
+  view.setMeta(metaTexts);
 
   const detailStack = document.createElement("div");
   detailStack.className = "detail-stack";
   appendSourceSection(detailStack, references, artifacts);
   appendRichSection(detailStack, payload?.answer_html || "", artifacts);
-
-  if (detailStack.childElementCount > 0) {
-    bubble.appendChild(detailStack);
-  }
+  view.setDetails(detailStack);
 }
 
 async function fetchJson(url, options = undefined) {
@@ -553,14 +787,6 @@ async function fetchJson(url, options = undefined) {
   const contentType = resp.headers.get("content-type") || "";
   const data = contentType.includes("application/json") ? await resp.json() : null;
   return { resp, data };
-}
-
-async function loadUiConfig() {
-  const { resp, data } = await fetchJson("/api/ui-config");
-  if (!resp.ok || !data?.ok) {
-    throw new Error("读取 UI 配置失败");
-  }
-  kbLabel.textContent = data.kb_label;
 }
 
 async function refreshHealth() {
@@ -572,7 +798,6 @@ async function refreshHealth() {
     setHealthStatus(data);
   } catch (_) {
     setStatus("error", "无法连接后端服务");
-    poolSummary.textContent = "健康状态获取失败";
   }
 }
 
@@ -610,13 +835,18 @@ async function readJsonLines(resp, onLine) {
 }
 
 async function askQuestion(question) {
-  appendMessage("user", question);
-  const bubble = appendMessage("assistant", "正在请求 ima...");
-  bubble.classList.add("streaming");
+  noteActivity();
+  noteActivity();
+  appendUserMessage(question);
+  const assistantView = createAssistantView();
+  assistantView.queueMainText("正在生成回答…");
+  assistantView.row.classList.add("is-streaming");
   setBusy(true);
 
   let donePayload = null;
-  let streamText = "";
+  let streamAnswerText = "";
+  let streamThinkingText = "";
+
   try {
     const resp = await fetch("/api/ask-stream", {
       method: "POST",
@@ -630,10 +860,18 @@ async function askQuestion(question) {
     }
 
     await readJsonLines(resp, (event) => {
+      if (event.type === "thinking_delta") {
+        streamThinkingText = typeof event.text === "string" ? event.text : `${streamThinkingText}${event.delta || ""}`;
+        assistantView.queueThinkingText(streamThinkingText, { streaming: true });
+        if (!streamAnswerText) {
+          assistantView.queueMainText("正在生成回答…");
+        }
+        return;
+      }
+
       if (event.type === "delta") {
-        streamText = typeof event.text === "string" ? event.text : `${streamText}${event.delta || ""}`;
-        setBubbleText(bubble, streamText || "正在请求 ima...");
-        scrollChatToBottom();
+        streamAnswerText = typeof event.text === "string" ? event.text : `${streamAnswerText}${event.delta || ""}`;
+        assistantView.queueMainText(streamAnswerText || "正在生成回答…");
         return;
       }
 
@@ -646,21 +884,23 @@ async function askQuestion(question) {
       }
     });
 
-    bubble.classList.remove("streaming");
+    assistantView.row.classList.remove("is-streaming");
     if (!donePayload) {
       throw new Error("STREAM_ENDED_WITHOUT_DONE");
     }
 
     if (donePayload.ok) {
-      renderAssistantResponse(bubble, donePayload, streamText);
+      renderAssistantResponse(assistantView, donePayload, streamAnswerText, streamThinkingText);
       await refreshHealth();
       return;
     }
 
     throw new Error(formatApiError(donePayload));
   } catch (error) {
-    bubble.classList.remove("streaming");
-    setBubbleText(bubble, error instanceof Error ? error.message : String(error));
+    assistantView.row.classList.remove("is-streaming");
+    assistantView.setMainText(error instanceof Error ? error.message : String(error));
+    assistantView.finalizeThinking(streamThinkingText);
+    assistantView.setMeta([]);
     setStatus("error", "请求失败");
   } finally {
     setBusy(false);
@@ -692,14 +932,14 @@ questionEl.addEventListener("keydown", async (event) => {
   }
 });
 
-questionEl.addEventListener("input", syncComposerState);
+questionEl.addEventListener("input", () => {
+  syncComposerState();
+  noteActivity();
+});
 
 clearBtn.addEventListener("click", () => {
-  closeSourceDrawer({ restoreFocus: false });
-  chat.innerHTML = "";
-  appendIntroMessage();
-  syncComposerState();
-  questionEl.focus();
+  clearConversation();
+  noteActivity();
 });
 
 drawerBackdrop.addEventListener("click", () => closeSourceDrawer());
@@ -720,18 +960,24 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
+window.addEventListener("pageshow", (event) => {
+  if (event.persisted) {
+    clearConversation({ focus: false });
+  }
+  noteActivity();
+});
+
 async function bootstrap() {
   setBusy(false);
-  syncComposerState();
-  appendIntroMessage();
-  await loadUiConfig();
+  clearConversation({ focus: false });
   await refreshHealth();
   setInterval(refreshHealth, 15000);
+  noteActivity();
   questionEl.focus();
 }
 
 bootstrap().catch((error) => {
   setStatus("error", "初始化失败");
-  appendMessage("assistant", error instanceof Error ? error.message : String(error));
+  const view = createAssistantView();
+  view.setMainText(error instanceof Error ? error.message : String(error));
 });
-

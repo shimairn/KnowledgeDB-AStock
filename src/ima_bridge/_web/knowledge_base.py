@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from playwright.sync_api import Locator, Page
 
 from ima_bridge.config import Settings
@@ -8,6 +10,8 @@ from ima_bridge.probes import CONTENT_PREFIX, INPUT_HINT, KB_NAV_TEXTS, LOGIN_HI
 from ima_bridge.target_state import TargetStateStore
 
 from .session import WebSession
+
+_CANONICAL_TEXT_RE = re.compile(r"[^0-9a-zA-Z\u4e00-\u9fff]+")
 
 
 class WebKnowledgeBaseNavigator:
@@ -29,6 +33,7 @@ class WebKnowledgeBaseNavigator:
             return
 
         self.open_kb_hub(page)
+        self.ensure_login(page)
         if self.confirm_target_context(page):
             return
         if self.probe_target_entries(page):
@@ -38,6 +43,7 @@ class WebKnowledgeBaseNavigator:
             nav_locator = page.get_by_text(nav, exact=False)
             if self.click_locator_candidates(page, nav_locator):
                 page.wait_for_timeout(700)
+                self.ensure_login(page)
                 if self.confirm_target_context(page):
                     return
                 if self.probe_target_entries(page):
@@ -56,7 +62,7 @@ class WebKnowledgeBaseNavigator:
             return
 
     def probe_target_entries(self, page: Page) -> bool:
-        for probe in (self.settings.kb_title, self.settings.kb_name):
+        for probe in self._probe_texts():
             locator = page.get_by_text(probe, exact=False)
             if not self.click_locator_candidates(page, locator):
                 continue
@@ -66,19 +72,25 @@ class WebKnowledgeBaseNavigator:
         return False
 
     def has_target_signals(self, body_text: str) -> bool:
-        if self.settings.kb_title not in body_text:
+        if self.identity_score(body_text) <= 0:
             return False
         return self.target_score(body_text) >= MIN_TARGET_SCORE
 
     def target_score(self, body_text: str) -> int:
-        score = 0
-        if self.settings.kb_title in body_text:
-            score += 2
-        if self.settings.kb_owner in body_text:
-            score += 1
+        score = self.identity_score(body_text)
         if CONTENT_PREFIX in body_text:
             score += 2
         if INPUT_HINT in body_text:
+            score += 1
+        return score
+
+    def identity_score(self, body_text: str) -> int:
+        score = 0
+        if self._contains(body_text, self.settings.kb_title):
+            score += 3
+        if self._contains(body_text, self.settings.kb_name):
+            score += 2
+        if self._contains(body_text, self.settings.kb_owner):
             score += 1
         return score
 
@@ -175,3 +187,23 @@ class WebKnowledgeBaseNavigator:
 
     def can_persist_target_url(self, url: str, body_text: str) -> bool:
         return self.store.can_persist(url, body_text, self.has_target_signals)
+
+    def _probe_texts(self) -> list[str]:
+        probes = [self.settings.kb_title, self.settings.kb_name, self.settings.kb_owner]
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for probe in probes:
+            value = (probe or "").strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            ordered.append(value)
+        return ordered
+
+    def _contains(self, body_text: str, target: str) -> bool:
+        body = self._canonical_text(body_text)
+        needle = self._canonical_text(target)
+        return bool(body and needle and needle in body)
+
+    def _canonical_text(self, value: str) -> str:
+        return _CANONICAL_TEXT_RE.sub("", (value or "").strip()).lower()

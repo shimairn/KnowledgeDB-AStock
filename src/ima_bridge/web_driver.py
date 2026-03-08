@@ -44,7 +44,22 @@ class WebAskDriver:
             text = self.session.body_text(page)
             if self.kb_navigator.is_login_required(text):
                 return False, "LOGIN_REQUIRED", "Web profile requires login. Run `python -m ima_bridge login` once."
-            return True, None, None
+            if self.kb_navigator.try_open_remembered_target(page):
+                return True, None, None
+            if self.kb_navigator.confirm_target_context(page):
+                return True, None, None
+
+            self.kb_navigator.open_kb_hub(page)
+            text = self.session.body_text(page)
+            if self.kb_navigator.is_login_required(text):
+                return False, "LOGIN_REQUIRED", "Web profile requires login. Run `python -m ima_bridge login` once."
+            if self.kb_navigator.confirm_target_context(page) or self.kb_navigator.probe_target_entries(page):
+                return True, None, None
+            return (
+                False,
+                "KB_NOT_FOUND",
+                f"Target knowledge base not confirmed: name={self.settings.kb_name}, owner={self.settings.kb_owner}, title={self.settings.kb_title}",
+            )
         finally:
             context.close()
 
@@ -67,7 +82,7 @@ class WebAskDriver:
         finally:
             context.close()
 
-    def ask(self, playwright: Playwright, question: str, headless: bool) -> tuple[str, str, list[str], str | None]:
+    def ask(self, playwright: Playwright, question: str, headless: bool) -> tuple[str, str, list[str], str | None, str]:
         return self._ask_impl(playwright=playwright, question=question, headless=headless, on_update=None)
 
     def ask_stream(
@@ -75,8 +90,8 @@ class WebAskDriver:
         playwright: Playwright,
         question: str,
         headless: bool,
-        on_update: Callable[[str, str], None],
-    ) -> tuple[str, str, list[str], str | None]:
+        on_update: Callable[..., None],
+    ) -> tuple[str, str, list[str], str | None, str]:
         return self._ask_impl(playwright=playwright, question=question, headless=headless, on_update=on_update)
 
     def _ask_impl(
@@ -84,8 +99,8 @@ class WebAskDriver:
         playwright: Playwright,
         question: str,
         headless: bool,
-        on_update: Callable[[str, str], None] | None,
-    ) -> tuple[str, str, list[str], str | None]:
+        on_update: Callable[..., None] | None,
+    ) -> tuple[str, str, list[str], str | None, str]:
         context = self.session.launch_context(playwright, headless=headless)
         try:
             page = self.session.acquire_page(context)
@@ -110,15 +125,16 @@ class WebAskDriver:
 
             latest_block = self.answer_extractor.extract_latest_ai_block(page)
             if latest_block is not None:
-                answer_text, answer_html = latest_block
+                answer_text, answer_html, thinking_text = latest_block
             else:
                 answer_text = self.answer_extractor.extract_answer_text(before_text, after_text, question)
                 if not answer_text:
                     raise AskTimeoutError("Answer text not detected after completion")
                 answer_html = after_html if after_html != before_html else ""
+                thinking_text = self.answer_extractor.extract_latest_thinking_text(page)
 
             references = self.answer_extractor.extract_references(answer_text)
             screenshot = self.answer_extractor.capture(page) if self.settings.capture_screenshot else None
-            return answer_text, answer_html, references, screenshot
+            return answer_text, answer_html, references, screenshot, thinking_text
         finally:
             context.close()

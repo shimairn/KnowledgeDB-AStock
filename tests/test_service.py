@@ -26,7 +26,7 @@ class FakeDriver:
             raise self.ask_error
         assert self.ask_result is not None
         if on_update is not None:
-            on_update("片段", "完整片段")
+            on_update("answer", "chunk", "full chunk")
         return self.ask_result
 
 
@@ -69,19 +69,25 @@ def test_service_maps_bridge_error_for_ask():
     assert response.error_message == "too slow"
 
 
-def test_service_streaming_callback_and_fallback_error_mapping():
+def test_service_streaming_callback_and_thinking_mapping():
     settings = make_settings()
     driver = FakeDriver(
         health_result=DriverHealthStatus(ok=True, source_driver="web"),
         login_result=DriverLoginStatus(ok=True, base_url="https://ima.qq.com/", profile_dir="profile", timeout_seconds=30),
-        ask_result=DriverAskResult(source_driver="web", answer_text="final", answer_html="<p>final</p>", references=["[1] ref"]),
+        ask_result=DriverAskResult(
+            source_driver="web",
+            thinking_text="thought",
+            answer_text="final",
+            answer_html="<p>final</p>",
+            references=["[1] ref"],
+        ),
     )
     service = IMAAskService(settings=settings, driver=driver)
-    updates: list[tuple[str, str]] = []
+    updates: list[tuple[str, str, str]] = []
 
-    response = service.ask_with_updates("hello", on_update=lambda delta, text: updates.append((delta, text)))
+    response = service.ask_with_updates("hello", on_update=lambda phase, delta, text: updates.append((phase, delta, text)))
 
     assert response.ok is True
-    assert updates == [("片段", "完整片段")]
+    assert updates == [("answer", "chunk", "full chunk")]
+    assert response.thinking_text == "thought"
     assert response.answer_text == "final"
-

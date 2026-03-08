@@ -21,10 +21,11 @@ class WebConversationRunner:
 
     def ensure_mode_model(self, page: Page) -> None:
         text = self.session.body_text(page)
-        if self.settings.mode_name not in text:
-            raise ConfigMismatchError(f"Expected mode not visible: {self.settings.mode_name}")
-        if self.settings.model_prefix not in text:
-            raise ConfigMismatchError(f"Expected model prefix not visible: {self.settings.model_prefix}")
+        if self.settings.mode_name in text:
+            return
+        if self.find_composer(page) is not None:
+            return
+        raise ConfigMismatchError(f"Expected mode not visible: {self.settings.mode_name}")
 
     def submit_question(self, page: Page, question: str) -> None:
         if not question.strip():
@@ -75,7 +76,7 @@ class WebConversationRunner:
         page: Page,
         before_text: str,
         question: str,
-        on_update: Callable[[str, str], None] | None = None,
+        on_update: Callable[..., None] | None = None,
     ) -> tuple[str, str]:
         deadline = time.monotonic() + self.settings.ask_timeout_seconds
         stable_rounds = 0
@@ -83,7 +84,8 @@ class WebConversationRunner:
         changed = False
         latest_text = before_text
         latest_html = self.session.body_html(page)
-        latest_stream_text = ""
+        latest_answer_text = ""
+        latest_thinking_text = ""
 
         while time.monotonic() < deadline:
             latest_text = self.session.body_text(page)
@@ -100,17 +102,25 @@ class WebConversationRunner:
                 changed = True
 
             if on_update is not None:
-                stream_text = self.extractor.extract_latest_ai_text(page)
-                if not stream_text:
-                    stream_text = self.extractor.extract_answer_text(before_text, latest_text, question)
-                if stream_text and stream_text != latest_stream_text:
-                    if stream_text.startswith(latest_stream_text):
-                        delta = stream_text[len(latest_stream_text) :]
-                    else:
-                        delta = stream_text
-                    if delta:
-                        on_update(delta, stream_text)
-                    latest_stream_text = stream_text
+                content = self.extractor.extract_latest_ai_content(page)
+                answer_text = "" if content is None else content.answer_text
+                thinking_text = "" if content is None else content.thinking_text
+
+                if not answer_text:
+                    answer_text = self.extractor.extract_answer_text(before_text, latest_text, question)
+
+                latest_answer_text = self._emit_update(
+                    phase="answer",
+                    current_text=answer_text,
+                    previous_text=latest_answer_text,
+                    on_update=on_update,
+                )
+                latest_thinking_text = self._emit_update(
+                    phase="thinking",
+                    current_text=thinking_text,
+                    previous_text=latest_thinking_text,
+                    on_update=on_update,
+                )
 
             if changed and latest_text != before_text and stable_rounds >= 2 and not self.has_loading_state(latest_text):
                 return latest_text, latest_html
@@ -125,6 +135,27 @@ class WebConversationRunner:
 
     def has_loading_state(self, body_text: str) -> bool:
         return any(hint in body_text for hint in LOADING_HINTS)
+
+    def _emit_update(
+        self,
+        phase: str,
+        current_text: str,
+        previous_text: str,
+        on_update: Callable[..., None],
+    ) -> str:
+        normalized = str(current_text or "")
+        if not normalized or normalized == previous_text:
+            return previous_text
+
+        if normalized.startswith(previous_text):
+            delta = normalized[len(previous_text) :]
+        else:
+            delta = normalized
+
+        delta = str(delta or "")
+        if delta:
+            on_update(phase, delta, normalized)
+        return normalized
 
     def _click_locator_candidates(self, page: Page, locator: Locator, max_candidates: int = 8) -> bool:
         try:

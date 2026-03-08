@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from ima_bridge.config import get_settings
 from ima_bridge.schemas import AskResponse, HealthResponse, KnowledgeBaseIdentity
 from ima_bridge.worker_pool import WorkerPoolManager
@@ -133,3 +135,27 @@ def test_worker_pool_health_payload_prefers_login_required(tmp_path, monkeypatch
     assert payload["error_code"] == "LOGIN_REQUIRED"
     assert payload["pool"]["workers_login_required"] == 1
     assert payload["pool"]["workers_error"] == 1
+
+
+def test_worker_pool_seeds_profiles_from_template(tmp_path, monkeypatch):
+    _configure_env(tmp_path, monkeypatch)
+    template_settings = get_settings(instance="default", driver_mode="web")
+    source_file = template_settings.web_profile_dir / "Default" / "Preferences"
+    source_file.parent.mkdir(parents=True, exist_ok=True)
+    source_file.write_text('{"auth": true}', encoding="utf-8")
+    template_settings.target_url_state_path.write_text("https://ima.qq.com/wiki/123", encoding="utf-8")
+
+    manager = WorkerPoolManager(
+        template_settings=template_settings,
+        worker_count=2,
+        service_factory=lambda settings: FakeService(settings),
+    )
+
+    seeded = manager.seed_profiles_from(template_settings)
+
+    assert seeded == 2
+    for worker in manager.workers:
+        copied = worker.settings.web_profile_dir / "Default" / "Preferences"
+        assert copied.exists()
+        assert copied.read_text(encoding="utf-8") == '{"auth": true}'
+        assert worker.settings.target_url_state_path.read_text(encoding="utf-8") == "https://ima.qq.com/wiki/123"
