@@ -82,6 +82,7 @@ python -m ima_bridge --instance win2 ask --question "长鑫存储上市设备敞
 - `IMA_WEB_PROFILE_DIR`: override profile directory
 - `IMA_WEB_PROFILE_ROOT`: profile root for multi-instance
 - `IMA_ASK_TIMEOUT_SECONDS`: max wait for response completion
+- `IMA_CAPTURE_SCREENSHOT`: `0` by default (set `1` to enable screenshots)
 
 Legacy app CDP vars are still available, but not the default path now.
 
@@ -108,3 +109,25 @@ Standard `error_code` values:
 - `LOGIN_REQUIRED`
 - `ASK_TIMEOUT`
 - `CAPTURE_FAILED`
+
+## Local chat UI
+
+You can run a local web chat page for normal Q&A:
+
+```powershell
+python -m ima_bridge --driver web ui
+```
+
+Custom host/port:
+
+```powershell
+python -m ima_bridge --driver web ui --host 127.0.0.1 --ui-port 8765
+```
+
+UI features:
+
+- Send questions directly to official ima AI
+- Stream assistant text output during generation (`/api/ask-stream`)
+- Render final `answer_html` in an iframe for richer tables/images/diagrams
+- Keep status surface minimal (health + login only)
+- Screenshot capture is disabled by default

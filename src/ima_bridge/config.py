@@ -37,6 +37,7 @@ class Settings:
     login_timeout_seconds: float = field(default_factory=lambda: float(os.getenv("IMA_LOGIN_TIMEOUT_SECONDS", "180")))
     ask_timeout_seconds: float = field(default_factory=lambda: float(os.getenv("IMA_ASK_TIMEOUT_SECONDS", "120")))
     poll_interval_seconds: float = field(default_factory=lambda: float(os.getenv("IMA_POLL_INTERVAL_SECONDS", "1.0")))
+    capture_screenshot: bool = field(default_factory=lambda: os.getenv("IMA_CAPTURE_SCREENSHOT", "0") == "1")
 
     @property
     def cdp_endpoint(self) -> str:

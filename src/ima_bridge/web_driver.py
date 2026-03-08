@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import re
 import time
-from pathlib import Path
+from typing import Callable
 from urllib.parse import urlparse
 
 from playwright.sync_api import BrowserContext, Error as PlaywrightError, Locator, Page, Playwright, TimeoutError
@@ -65,7 +66,25 @@ class WebAskDriver:
         finally:
             context.close()
 
-    def ask(self, playwright: Playwright, question: str, headless: bool) -> tuple[str, str, list[str], str]:
+    def ask(self, playwright: Playwright, question: str, headless: bool) -> tuple[str, str, list[str], str | None]:
+        return self._ask_impl(playwright=playwright, question=question, headless=headless, on_update=None)
+
+    def ask_stream(
+        self,
+        playwright: Playwright,
+        question: str,
+        headless: bool,
+        on_update: Callable[[str, str], None],
+    ) -> tuple[str, str, list[str], str | None]:
+        return self._ask_impl(playwright=playwright, question=question, headless=headless, on_update=on_update)
+
+    def _ask_impl(
+        self,
+        playwright: Playwright,
+        question: str,
+        headless: bool,
+        on_update: Callable[[str, str], None] | None,
+    ) -> tuple[str, str, list[str], str | None]:
         context = self._launch_context(playwright, headless=headless)
         try:
             page = self._acquire_page(context)
@@ -81,7 +100,12 @@ class WebAskDriver:
             before_text = self._body_text(page)
             before_html = self._body_html(page)
             self._submit_question(page, question)
-            after_text, after_html = self._wait_answer(page, before_text)
+            after_text, after_html = self._wait_answer(
+                page,
+                before_text,
+                question=question,
+                on_update=on_update,
+            )
 
             latest_block = self._extract_latest_ai_block(page)
             if latest_block is not None:
@@ -93,7 +117,7 @@ class WebAskDriver:
                 answer_html = after_html if after_html != before_html else ""
 
             references = self._extract_references(answer_text)
-            screenshot = self._capture(page)
+            screenshot = self._capture(page) if self.settings.capture_screenshot else None
             return answer_text, answer_html, references, screenshot
         finally:
             context.close()
@@ -324,13 +348,20 @@ class WebAskDriver:
                     return candidate
         return None
 
-    def _wait_answer(self, page: Page, before_text: str) -> tuple[str, str]:
+    def _wait_answer(
+        self,
+        page: Page,
+        before_text: str,
+        question: str,
+        on_update: Callable[[str, str], None] | None = None,
+    ) -> tuple[str, str]:
         deadline = time.monotonic() + self.settings.ask_timeout_seconds
         stable_rounds = 0
         previous_signature = self._text_signature(before_text)
         changed = False
         latest_text = before_text
         latest_html = self._body_html(page)
+        latest_stream_text = ""
 
         while time.monotonic() < deadline:
             latest_text = self._body_text(page)
@@ -345,6 +376,19 @@ class WebAskDriver:
 
             if latest_text != before_text:
                 changed = True
+
+            if on_update is not None:
+                stream_text = self._extract_latest_ai_text(page)
+                if not stream_text:
+                    stream_text = self._extract_answer_text(before_text, latest_text, question)
+                if stream_text and stream_text != latest_stream_text:
+                    if stream_text.startswith(latest_stream_text):
+                        delta = stream_text[len(latest_stream_text) :]
+                    else:
+                        delta = stream_text
+                    if delta:
+                        on_update(delta, stream_text)
+                    latest_stream_text = stream_text
 
             if changed and latest_text != before_text and stable_rounds >= 2 and not self._has_loading_state(latest_text):
                 return latest_text, latest_html
@@ -406,7 +450,7 @@ class WebAskDriver:
                 node = bubble if bubble.count() > 0 else container
                 try:
                     raw_text = node.inner_text(timeout=1500).strip()
-                    raw_html = node.inner_html(timeout=1500)
+                    raw_html = self._compose_answer_html(page, node)
                 except Exception:
                     continue
 
@@ -415,6 +459,229 @@ class WebAskDriver:
                     continue
                 return text, raw_html
         return None
+
+    def _extract_latest_ai_text(self, page: Page) -> str:
+        selectors = (
+            "div[class*='normalModeAiBubbleWrapper'] div[class*='aiContainer']",
+            "div[class*='aiContainer_']",
+        )
+        for selector in selectors:
+            containers = page.locator(selector)
+            try:
+                count = containers.count()
+            except Exception:
+                continue
+            if count == 0:
+                continue
+            for index in range(count - 1, -1, -1):
+                container = containers.nth(index)
+                try:
+                    if not container.is_visible():
+                        continue
+                except Exception:
+                    continue
+                bubble = container.locator("div[class*='_bubble_']").first
+                node = bubble if bubble.count() > 0 else container
+                try:
+                    raw_text = node.inner_text(timeout=1200).strip()
+                except Exception:
+                    continue
+                text = self._clean_ai_text(raw_text)
+                if text:
+                    return text
+        return ""
+
+    def _compose_answer_html(self, page: Page, node: Locator) -> str:
+        try:
+            payload = node.evaluate(
+                """
+                (element) => {
+                  const clone = element.cloneNode(true);
+                  const removeSelectors = [
+                    "div[id^='section-anchor-']",
+                    "div[class*='_bottom_']",
+                    "div[class*='_divider_']",
+                    ".t-popup",
+                    ".t-trigger",
+                    "[data-popup]",
+                    "button",
+                    "script",
+                    "style",
+                    "noscript",
+                    "iframe",
+                    "[role='button']:not([id^='@context-ref'])",
+                  ];
+
+                  for (const selector of removeSelectors) {
+                    for (const item of Array.from(clone.querySelectorAll(selector))) {
+                      item.remove();
+                    }
+                  }
+
+                  for (const item of Array.from(clone.querySelectorAll('*'))) {
+                    for (const attr of Array.from(item.attributes)) {
+                      const name = attr.name.toLowerCase();
+                      if (name.startsWith('on')) {
+                        item.removeAttribute(attr.name);
+                      }
+                    }
+
+                    if (item.hasAttribute('src')) {
+                      try {
+                        item.setAttribute('src', new URL(item.getAttribute('src'), document.baseURI).href);
+                      } catch (_) {
+                      }
+                    }
+
+                    if (item.hasAttribute('href')) {
+                      try {
+                        item.setAttribute('href', new URL(item.getAttribute('href'), document.baseURI).href);
+                      } catch (_) {
+                      }
+                    }
+                  }
+
+                  const wrapper = document.createElement('div');
+                  wrapper.appendChild(clone);
+                  return {
+                    html: wrapper.innerHTML.trim(),
+                    baseUrl: document.baseURI,
+                  };
+                }
+                """,
+                timeout=1500,
+            )
+        except Exception:
+            return ""
+
+        content_html = str(payload.get("html", "")).strip()
+        if not content_html:
+            return ""
+
+        base_url = str(payload.get("baseUrl", page.url or self.settings.web_base_url)).strip() or self.settings.web_base_url
+        class_names = self._extract_class_names(content_html)
+        stylesheet_links = self._collect_stylesheet_links(page)
+        styles_text = self._collect_page_styles(page, class_names)
+        head_parts = [
+            '<meta charset="utf-8" />',
+            f'<base href="{base_url}" />',
+        ]
+        for href in stylesheet_links:
+            head_parts.append(f'<link rel="stylesheet" href="{href}" />')
+        head_parts.append(
+            "<style>"
+            "html,body{margin:0;padding:0;background:#fff;color:#1e2a45;}"
+            "body{font:14px/1.6 \"Segoe UI\",\"PingFang SC\",\"Microsoft YaHei\",sans-serif;}"
+            "img,svg,canvas,video{max-width:100%;height:auto;}"
+            "table{max-width:100%;}"
+            "pre{white-space:pre-wrap;word-break:break-word;}"
+            "a{color:inherit;}"
+            "</style>"
+        )
+        if styles_text:
+            head_parts.append(f"<style>{styles_text}</style>")
+        return f"<!doctype html><html><head>{''.join(head_parts)}</head><body>{content_html}</body></html>"
+
+    def _collect_stylesheet_links(self, page: Page) -> list[str]:
+        script = """
+        () => Array.from(document.querySelectorAll('link[rel="stylesheet"]'))
+          .map((item) => item.href || '')
+          .map((item) => item.trim())
+          .filter(Boolean)
+        """
+        try:
+            values = page.evaluate(script)
+        except Exception:
+            return []
+
+        seen: set[str] = set()
+        results: list[str] = []
+        for value in values:
+            href = str(value).strip()
+            if not href or href in seen:
+                continue
+            seen.add(href)
+            results.append(href)
+        return results
+
+    def _extract_class_names(self, html: str) -> list[str]:
+        class_names: set[str] = set()
+        for match in re.finditer(r'class=["\']([^"\']+)["\']', html):
+            value = match.group(1).strip()
+            if not value:
+                continue
+            for name in value.split():
+                cleaned = name.strip()
+                if cleaned:
+                    class_names.add(cleaned)
+        return sorted(class_names)
+
+    def _collect_page_styles(self, page: Page, class_names: list[str]) -> str:
+        script = """
+        (classNames) => {
+          const chunks = [];
+          const seen = new Set();
+          const targetSelectors = new Set((classNames || []).map((name) => `.${name}`));
+          const hasTargets = targetSelectors.size > 0;
+          const matchSelector = (selectorText) => {
+            if (!hasTargets) return true;
+            const selector = selectorText || '';
+            for (const target of targetSelectors) {
+              if (selector.includes(target)) return true;
+            }
+            return false;
+          };
+          const push = (value) => {
+            const text = (value || '').trim();
+            if (!text || seen.has(text)) return;
+            seen.add(text);
+            chunks.push(text);
+          };
+
+          const collectRules = (rules) => {
+            const local = [];
+            for (const rule of Array.from(rules || [])) {
+              try {
+                if (rule.type === CSSRule.STYLE_RULE) {
+                  if (matchSelector(rule.selectorText || '')) {
+                    local.push(rule.cssText);
+                  }
+                  continue;
+                }
+                if (rule.type === CSSRule.MEDIA_RULE || rule.type === CSSRule.SUPPORTS_RULE) {
+                  const inner = collectRules(rule.cssRules || []);
+                  if (!inner) continue;
+                  if (rule.type === CSSRule.MEDIA_RULE) {
+                    local.push(`@media ${rule.conditionText}{${inner}}`);
+                  } else {
+                    local.push(`@supports ${rule.conditionText}{${inner}}`);
+                  }
+                  continue;
+                }
+                if (!hasTargets && rule.cssText) {
+                  local.push(rule.cssText);
+                }
+              } catch (_) {
+              }
+            }
+            return local.join('\\n');
+          };
+
+          for (const sheet of Array.from(document.styleSheets)) {
+            try {
+              if (!sheet.cssRules) continue;
+              const css = collectRules(sheet.cssRules);
+              push(css);
+            } catch (_) {
+            }
+          }
+          return chunks.join('\\n');
+        }
+        """
+        try:
+            return page.evaluate(script, class_names)
+        except Exception:
+            return ""
 
     def _clean_ai_text(self, text: str) -> str:
         lines = [line.strip() for line in text.splitlines()]

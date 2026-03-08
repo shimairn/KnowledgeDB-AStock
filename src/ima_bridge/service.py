@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Callable
+
 from playwright.sync_api import sync_playwright
 
 from ima_bridge.cdp_driver import CdpAskDriver
@@ -83,7 +85,11 @@ class IMAAskService:
                 update={"error_code": fallback.error_code, "error_message": fallback.message, "captured_at": now_iso()}
             )
 
-    def ask(self, question: str) -> AskResponse:
+    def ask_with_updates(
+        self,
+        question: str,
+        on_update: Callable[[str, str], None] | None = None,
+    ) -> AskResponse:
         kb = KnowledgeBaseIdentity(name=self.settings.kb_name, owner=self.settings.kb_owner, title=self.settings.kb_title)
         base = AskResponse(
             ok=False,
@@ -97,14 +103,24 @@ class IMAAskService:
         try:
             if self.settings.driver_mode == "web":
                 with sync_playwright() as playwright:
-                    answer_text, answer_html, references, screenshot = self.web_driver.ask(
-                        playwright, question, headless=self.settings.web_headless
-                    )
+                    if on_update is None:
+                        answer_text, answer_html, references, screenshot = self.web_driver.ask(
+                            playwright, question, headless=self.settings.web_headless
+                        )
+                    else:
+                        answer_text, answer_html, references, screenshot = self.web_driver.ask_stream(
+                            playwright,
+                            question,
+                            headless=self.settings.web_headless,
+                            on_update=on_update,
+                        )
             else:
                 endpoint = self.runtime.ensure_ready()
                 with sync_playwright() as playwright:
                     browser = playwright.chromium.connect_over_cdp(endpoint)
                     answer_text, answer_html, references, screenshot = self.driver.ask(browser, question)
+                if on_update is not None and answer_text:
+                    on_update(answer_text, answer_text)
             return base.model_copy(
                 update={
                     "ok": True,
@@ -122,3 +138,6 @@ class IMAAskService:
         except Exception as exc:
             fallback = CaptureFailedError(str(exc))
             return base.model_copy(update={"error_code": fallback.error_code, "error_message": fallback.message})
+
+    def ask(self, question: str) -> AskResponse:
+        return self.ask_with_updates(question=question, on_update=None)

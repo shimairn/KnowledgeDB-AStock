@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 import time
-from pathlib import Path
 
 from playwright.sync_api import Browser, Locator, Page
 
@@ -31,7 +30,7 @@ class CdpAskDriver:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
 
-    def ask(self, browser: Browser, question: str) -> tuple[str, str, list[str], str]:
+    def ask(self, browser: Browser, question: str) -> tuple[str, str, list[str], str | None]:
         page = self._acquire_page(browser)
         self._ensure_login(page)
         self._ensure_target_kb(page)
@@ -48,7 +47,7 @@ class CdpAskDriver:
 
         answer_html = after_html if after_html != before_html else ""
         references = self._extract_references(answer_text)
-        screenshot = self._capture(page)
+        screenshot = self._capture(page) if self.settings.capture_screenshot else None
         return answer_text, answer_html, references, screenshot
 
     def _acquire_page(self, browser: Browser) -> Page:
@@ -195,4 +194,3 @@ class CdpAskDriver:
 
     def _body_html(self, page: Page) -> str:
         return page.inner_html("body")
-

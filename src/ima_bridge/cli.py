@@ -4,6 +4,7 @@ import argparse
 import json
 import sys
 
+from ima_bridge.chat_ui import run_chat_ui
 from ima_bridge.config import get_settings
 from ima_bridge.service import IMAAskService
 
@@ -31,6 +32,11 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--question", default=None)
     start.add_argument("--login-timeout", type=float, default=180.0)
     start.add_argument("--no-auto-login", action="store_true")
+
+    ui = subparsers.add_parser("ui")
+    ui.add_argument("--host", default="127.0.0.1")
+    ui.add_argument("--ui-port", type=int, default=8765)
+    ui.add_argument("--no-open", action="store_true")
     return parser
 
 
@@ -95,7 +101,7 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
 
-    if args.command not in {"health", "ask", "login", "start"}:
+    if args.command not in {"health", "ask", "login", "start", "ui"}:
         parser.print_help()
         return 1
 
@@ -117,6 +123,8 @@ def main() -> int:
         return 0 if result.ok else 1
     elif args.command == "start":
         return run_start(service, args)
+    elif args.command == "ui":
+        return run_chat_ui(service=service, host=args.host, port=args.ui_port, open_browser=not args.no_open)
     else:
         result = service.ask(args.question)
         print_json(result)

@@ -34,3 +34,12 @@ def test_cli_parses_start():
     assert args.question == "q1"
     assert args.login_timeout == 120
     assert args.no_auto_login is True
+
+
+def test_cli_parses_ui():
+    parser = build_parser()
+    args = parser.parse_args(["ui", "--host", "0.0.0.0", "--ui-port", "8899", "--no-open"])
+    assert args.command == "ui"
+    assert args.host == "0.0.0.0"
+    assert args.ui_port == 8899
+    assert args.no_open is True
