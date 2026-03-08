@@ -27,6 +27,14 @@ def test_cli_parses_login():
     assert args.timeout == 66
 
 
+def test_cli_parses_login_pool():
+    parser = build_parser()
+    args = parser.parse_args(["login-pool", "--workers", "5", "--timeout", "90"])
+    assert args.command == "login-pool"
+    assert args.workers == 5
+    assert args.timeout == 90
+
+
 def test_cli_parses_start():
     parser = build_parser()
     args = parser.parse_args(["start", "--question", "q1", "--login-timeout", "120", "--no-auto-login"])
@@ -38,8 +46,9 @@ def test_cli_parses_start():
 
 def test_cli_parses_ui():
     parser = build_parser()
-    args = parser.parse_args(["ui", "--host", "0.0.0.0", "--ui-port", "8899", "--no-open"])
+    args = parser.parse_args(["ui", "--host", "0.0.0.0", "--ui-port", "8899", "--workers", "5", "--no-open"])
     assert args.command == "ui"
     assert args.host == "0.0.0.0"
     assert args.ui_port == 8899
+    assert args.workers == 5
     assert args.no_open is True

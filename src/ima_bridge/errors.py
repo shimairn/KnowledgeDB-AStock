@@ -31,4 +31,3 @@ class LoginRequiredError(BridgeError):
 class AskTimeoutError(BridgeError):
     def __init__(self, message: str) -> None:
         super().__init__("ASK_TIMEOUT", message)
-

@@ -51,17 +51,17 @@ class WebServiceDriver(AskDriver):
     def ask(
         self,
         question: str,
-        on_update: Callable[[str, str], None] | None = None,
+        on_update: Callable[..., None] | None = None,
     ) -> DriverAskResult:
         with sync_playwright() as playwright:
             if on_update is None:
-                answer_text, answer_html, references, screenshot = self.web_driver.ask(
+                answer_text, answer_html, references, screenshot, thinking_text = self.web_driver.ask(
                     playwright,
                     question,
                     headless=self.settings.web_headless,
                 )
             else:
-                answer_text, answer_html, references, screenshot = self.web_driver.ask_stream(
+                answer_text, answer_html, references, screenshot, thinking_text = self.web_driver.ask_stream(
                     playwright,
                     question,
                     headless=self.settings.web_headless,
@@ -69,6 +69,7 @@ class WebServiceDriver(AskDriver):
                 )
         return DriverAskResult(
             source_driver="web",
+            thinking_text=thinking_text,
             answer_text=answer_text,
             answer_html=answer_html,
             references=references,
@@ -113,7 +114,7 @@ class LegacyAppServiceDriver(AskDriver):
     def ask(
         self,
         question: str,
-        on_update: Callable[[str, str], None] | None = None,
+        on_update: Callable[..., None] | None = None,
     ) -> DriverAskResult:
         endpoint = self.runtime.ensure_ready()
         with sync_playwright() as playwright:
@@ -123,9 +124,10 @@ class LegacyAppServiceDriver(AskDriver):
             finally:
                 browser.close()
         if on_update is not None and answer_text:
-            on_update(answer_text, answer_text)
+            on_update("answer", answer_text, answer_text)
         return DriverAskResult(
             source_driver="app",
+            thinking_text="",
             answer_text=answer_text,
             answer_html=answer_html,
             references=references,

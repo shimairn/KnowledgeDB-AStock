@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
@@ -16,7 +16,7 @@ class Settings:
     kb_owner: str = field(default_factory=lambda: os.getenv("IMA_KB_OWNER", "\u8d2d\u7269\u5c0f\u52a9\u624b"))
     kb_title: str = field(default_factory=lambda: os.getenv("IMA_KB_TITLE", "\u3010\u7231\u5206\u4eab\u3011\u7684\u8d22\u7ecf\u8d44\u8baf"))
     mode_name: str = field(default_factory=lambda: os.getenv("IMA_MODE_NAME", "\u5bf9\u8bdd\u6a21\u5f0f"))
-    model_prefix: str = field(default_factory=lambda: os.getenv("IMA_MODEL_PREFIX", "DS V3.2"))
+    model_prefix: str = field(default_factory=lambda: os.getenv("IMA_MODEL_PREFIX", "DS V3.2 T"))
 
     driver_mode: str = field(default_factory=lambda: os.getenv("IMA_DRIVER_MODE", "web"))
     app_executable: str | None = field(default_factory=lambda: os.getenv("IMA_APP_EXECUTABLE"))
@@ -38,6 +38,10 @@ class Settings:
     ask_timeout_seconds: float = field(default_factory=lambda: float(os.getenv("IMA_ASK_TIMEOUT_SECONDS", "120")))
     poll_interval_seconds: float = field(default_factory=lambda: float(os.getenv("IMA_POLL_INTERVAL_SECONDS", "1.0")))
     capture_screenshot: bool = field(default_factory=lambda: os.getenv("IMA_CAPTURE_SCREENSHOT", "0") == "1")
+    ui_worker_count: int = field(default_factory=lambda: int(os.getenv("IMA_UI_WORKER_COUNT", "10")))
+    ui_rate_limit_per_minute: int = field(default_factory=lambda: int(os.getenv("IMA_UI_RATE_LIMIT_PER_MINUTE", "12")))
+    ui_max_concurrent_per_ip: int = field(default_factory=lambda: int(os.getenv("IMA_UI_MAX_CONCURRENT_PER_IP", "2")))
+    ui_trust_proxy: bool = field(default_factory=lambda: os.getenv("IMA_UI_TRUST_PROXY", "0") == "1")
 
     @property
     def cdp_endpoint(self) -> str:
@@ -121,3 +125,9 @@ def resolve_web_profile_dir(instance: str) -> Path:
         return Path(direct)
     root = Path(os.getenv("IMA_WEB_PROFILE_ROOT", "output/playwright/web-profiles"))
     return root / instance
+
+
+def is_loopback_host(host: str) -> bool:
+    normalized = (host or "").strip().lower()
+    return normalized in {"127.0.0.1", "localhost", "::1"}
+

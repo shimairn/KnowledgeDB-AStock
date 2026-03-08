@@ -1,140 +1,246 @@
 from __future__ import annotations
 
 import json
-import threading
-import urllib.error
-import urllib.request
-from contextlib import contextmanager
-from types import SimpleNamespace
 
-from ima_bridge.chat_ui import create_chat_ui_server
-from ima_bridge.schemas import AskResponse, HealthResponse, KnowledgeBaseIdentity, LoginResponse
+from fastapi.testclient import TestClient
+
+from ima_bridge.chat_ui import create_chat_ui_app
+from ima_bridge.config import get_settings
+from ima_bridge.schemas import AskResponse, KnowledgeBaseIdentity, LoginResponse
+from ima_bridge.ui_rate_limit import UIRateLimiter
 
 
-class FakeService:
-    def __init__(self) -> None:
-        self.settings = SimpleNamespace(kb_name="爱分享", kb_owner="购物小助手", kb_title="【爱分享】的财经资讯")
-        self.ask_stream_should_fail = False
+def _configure_env(tmp_path, monkeypatch, *, trust_proxy: bool = False, rate_limit: int = 12, max_concurrent: int = 2) -> None:
+    monkeypatch.setenv("IMA_MANAGED_PROFILE_ROOT", str(tmp_path / "profiles"))
+    monkeypatch.setenv("IMA_WEB_PROFILE_ROOT", str(tmp_path / "web-profiles"))
+    monkeypatch.setenv("IMA_ARTIFACTS_DIR", str(tmp_path / "artifacts"))
+    monkeypatch.setenv("IMA_UI_RATE_LIMIT_PER_MINUTE", str(rate_limit))
+    monkeypatch.setenv("IMA_UI_MAX_CONCURRENT_PER_IP", str(max_concurrent))
+    monkeypatch.setenv("IMA_UI_TRUST_PROXY", "1" if trust_proxy else "0")
 
-    def health(self) -> HealthResponse:
-        return HealthResponse(
-            ok=True,
-            instance="default",
-            source_driver="web",
-            base_url="https://ima.qq.com/",
-            profile_dir="profile",
-            headless=True,
-            managed_profile_dir="managed",
-        )
+
+def _make_settings(tmp_path, monkeypatch, **kwargs):
+    _configure_env(tmp_path, monkeypatch, **kwargs)
+    return get_settings(instance="ui-test", driver_mode="web")
+
+
+def _make_ask_response(question: str, *, ok: bool = True) -> AskResponse:
+    kb = KnowledgeBaseIdentity(name="爱分享", owner="购物小助手", title="【爱分享】的财经资讯")
+    return AskResponse(
+        ok=ok,
+        question=question,
+        knowledge_base=kb,
+        mode="对话模式",
+        model="DS V3.2 T",
+        source_driver="web",
+        answer_text="final",
+        answer_html="<p>final</p>",
+        error_code=None if ok else "LOGIN_REQUIRED",
+        error_message=None if ok else "login required",
+    )
+
+
+class FakeWorkerService:
+    def __init__(self, *, stream_error: Exception | None = None) -> None:
+        self.stream_error = stream_error
+
+    def ask(self, question: str) -> AskResponse:
+        return _make_ask_response(question)
+
+    def ask_with_updates(self, question: str, on_update=None) -> AskResponse:
+        if self.stream_error is not None:
+            raise self.stream_error
+        if on_update is not None:
+            on_update("片段", "完整片段")
+        return _make_ask_response(question)
 
     def login(self, timeout_seconds: float | None = None) -> LoginResponse:
         return LoginResponse(
             ok=True,
-            instance="default",
+            instance="ui-test",
             base_url="https://ima.qq.com/",
             profile_dir="profile",
             timeout_seconds=timeout_seconds or 180,
         )
 
-    def ask(self, question: str) -> AskResponse:
-        kb = KnowledgeBaseIdentity(name="爱分享", owner="购物小助手", title="【爱分享】的财经资讯")
-        return AskResponse(ok=True, question=question, knowledge_base=kb, mode="对话模式", model="DS V3.2", answer_text="final")
 
-    def ask_with_updates(self, question: str, on_update=None) -> AskResponse:
-        if self.ask_stream_should_fail:
-            raise RuntimeError("boom")
-        kb = KnowledgeBaseIdentity(name="爱分享", owner="购物小助手", title="【爱分享】的财经资讯")
-        if on_update is not None:
-            on_update("片段", "完整片段")
-        return AskResponse(
-            ok=True,
-            question=question,
-            knowledge_base=kb,
-            mode="对话模式",
-            model="DS V3.2",
-            answer_text="final",
-            answer_html="<p>final</p>",
-        )
+class FakePoolManager:
+    def __init__(self, *, worker=None, payload=None) -> None:
+        self.worker = worker
+        self.refresh_calls = 0
+        self.payload = payload or {
+            "ok": True,
+            "instance": "pool",
+            "source_driver": "web",
+            "cdp_port": None,
+            "cdp_endpoint": None,
+            "cdp_ready": None,
+            "base_url": "https://ima.qq.com/",
+            "profile_dir": None,
+            "headless": True,
+            "app_executable": None,
+            "managed_profile_dir": "managed",
+            "error_code": None,
+            "error_message": None,
+            "pool": {
+                "workers_total": 1,
+                "workers_ready": 1,
+                "workers_busy": 0,
+                "workers_login_required": 0,
+                "workers_error": 0,
+                "capacity_available": True,
+            },
+        }
 
+    def refresh_all(self) -> None:
+        self.refresh_calls += 1
+        return None
 
-@contextmanager
-def running_server(service: FakeService):
-    server = create_chat_ui_server(service=service, host="127.0.0.1", port=0)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield f"http://127.0.0.1:{server.server_address[1]}"
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
+    def summarize(self):
+        pool = self.payload["pool"]
+        return type("Summary", (), pool)()
 
+    def health_payload(self) -> dict:
+        return dict(self.payload)
 
-def request_json(url: str, method: str = "GET", payload: dict | None = None):
-    data = None if payload is None else json.dumps(payload).encode("utf-8")
-    request = urllib.request.Request(url, data=data, method=method)
-    if data is not None:
-        request.add_header("Content-Type", "application/json")
-    with urllib.request.urlopen(request, timeout=5) as response:
-        return response.status, json.loads(response.read().decode("utf-8"))
+    def try_acquire(self):
+        worker = self.worker
+        self.worker = None
+        return worker
 
-
-def test_chat_ui_serves_index_and_assets():
-    service = FakeService()
-    with running_server(service) as base_url:
-        with urllib.request.urlopen(f"{base_url}/", timeout=5) as response:
-            index_html = response.read().decode("utf-8")
-        with urllib.request.urlopen(f"{base_url}/assets/app.js", timeout=5) as response:
-            app_js = response.read().decode("utf-8")
-
-    assert "/assets/app.css" in index_html
-    assert "爱分享 / 购物小助手 / 【爱分享】的财经资讯" in index_html
-    assert "answer_html" in app_js
+    def release(self, worker, response=None, exc=None):
+        return "ready"
 
 
-def test_chat_ui_health_login_and_stream_success():
-    service = FakeService()
-    with running_server(service) as base_url:
-        status, health = request_json(f"{base_url}/api/health")
-        assert status == 200
-        assert health["ok"] is True
+def test_chat_ui_serves_static_index_and_assets(tmp_path, monkeypatch):
+    settings = _make_settings(tmp_path, monkeypatch)
+    service = type("Service", (), {"settings": settings})()
+    worker = type("Worker", (), {"worker_id": "worker-01", "service": FakeWorkerService()})()
+    client = TestClient(create_chat_ui_app(service=service, pool_manager=FakePoolManager(worker=worker)))
 
-        status, login = request_json(f"{base_url}/api/login", method="POST", payload={"timeout": 12})
-        assert status == 200
-        assert login["ok"] is True
-        assert login["timeout_seconds"] == 12.0
+    index_response = client.get("/")
+    js_response = client.get("/assets/app.js")
 
-        request = urllib.request.Request(
-            f"{base_url}/api/ask-stream",
-            data=json.dumps({"question": "你好"}).encode("utf-8"),
-            method="POST",
-            headers={"Content-Type": "application/json"},
-        )
-        with urllib.request.urlopen(request, timeout=5) as response:
-            events = [json.loads(line) for line in response.read().decode("utf-8").splitlines() if line.strip()]
+    assert index_response.status_code == 200
+    assert "id=\"kbLabel\"" in index_response.text
+    assert js_response.status_code == 200
+    assert "/api/ui-config" in js_response.text
 
+
+def test_chat_ui_ui_config_and_health_are_anonymous(tmp_path, monkeypatch):
+    settings = _make_settings(tmp_path, monkeypatch)
+    service = type("Service", (), {"settings": settings})()
+    worker = type("Worker", (), {"worker_id": "worker-01", "service": FakeWorkerService()})()
+    client = TestClient(create_chat_ui_app(service=service, pool_manager=FakePoolManager(worker=worker)))
+
+    config_response = client.get("/api/ui-config")
+    health_response = client.get("/api/health")
+
+    assert config_response.status_code == 200
+    assert config_response.json()["auth_required"] is False
+    assert config_response.json()["workers_total"] == 1
+    assert settings.kb_name in config_response.json()["kb_label"]
+    assert health_response.status_code == 200
+    assert health_response.json()["ok"] is True
+    assert client.app.state.pool_manager.refresh_calls == 0
+
+
+def test_chat_ui_does_not_expose_legacy_auth_endpoints(tmp_path, monkeypatch):
+    settings = _make_settings(tmp_path, monkeypatch)
+    service = type("Service", (), {"settings": settings})()
+    worker = type("Worker", (), {"worker_id": "worker-01", "service": FakeWorkerService()})()
+    client = TestClient(create_chat_ui_app(service=service, pool_manager=FakePoolManager(worker=worker)))
+
+    assert client.post("/auth/login", json={"secret": "ignored"}).status_code == 404
+    assert client.get("/auth/me").status_code == 404
+    assert client.post("/auth/logout").status_code == 404
+    assert client.post("/api/login", json={"timeout": 12}).status_code == 404
+
+
+def test_chat_ui_stream_success_sequence(tmp_path, monkeypatch):
+    settings = _make_settings(tmp_path, monkeypatch)
+    service = type("Service", (), {"settings": settings})()
+    worker = type("Worker", (), {"worker_id": "worker-01", "service": FakeWorkerService()})()
+    client = TestClient(create_chat_ui_app(service=service, pool_manager=FakePoolManager(worker=worker)))
+
+    index_response = client.get("/")
+    config_response = client.get("/api/ui-config")
+    health_response = client.get("/api/health")
+    with client.stream("POST", "/api/ask-stream", json={"question": "你好"}) as response:
+        events = [json.loads(line) for line in response.iter_lines() if line]
+
+    assert index_response.status_code == 200
+    assert config_response.status_code == 200
+    assert health_response.status_code == 200
+    assert response.status_code == 200
     assert [event["type"] for event in events] == ["start", "delta", "done"]
     assert events[-1]["response"]["answer_html"] == "<p>final</p>"
 
 
-def test_chat_ui_stream_failure_and_empty_question():
-    service = FakeService()
-    service.ask_stream_should_fail = True
-    with running_server(service) as base_url:
-        try:
-            request_json(f"{base_url}/api/ask-stream", method="POST", payload={"question": "   "})
-        except urllib.error.HTTPError as exc:
-            assert exc.code == 400
-            payload = json.loads(exc.read().decode("utf-8"))
-            assert payload["error_code"] == "ASK_TIMEOUT"
+def test_chat_ui_busy_returns_429(tmp_path, monkeypatch):
+    settings = _make_settings(tmp_path, monkeypatch)
+    service = type("Service", (), {"settings": settings})()
+    pool = FakePoolManager(
+        worker=None,
+        payload={
+            "ok": False,
+            "instance": "pool",
+            "source_driver": "web",
+            "cdp_port": None,
+            "cdp_endpoint": None,
+            "cdp_ready": None,
+            "base_url": "https://ima.qq.com/",
+            "profile_dir": None,
+            "headless": True,
+            "app_executable": None,
+            "managed_profile_dir": "managed",
+            "error_code": "BUSY",
+            "error_message": "No idle worker available",
+            "pool": {
+                "workers_total": 1,
+                "workers_ready": 0,
+                "workers_busy": 1,
+                "workers_login_required": 0,
+                "workers_error": 0,
+                "capacity_available": False,
+            },
+        },
+    )
+    client = TestClient(create_chat_ui_app(service=service, pool_manager=pool))
 
-        request = urllib.request.Request(
-            f"{base_url}/api/ask-stream",
-            data=json.dumps({"question": "你好"}).encode("utf-8"),
-            method="POST",
-            headers={"Content-Type": "application/json"},
+    response = client.post("/api/ask-stream", json={"question": "你好"})
+
+    assert response.status_code == 429
+    assert response.json()["error_code"] == "BUSY"
+
+
+def test_chat_ui_rate_limited_returns_429(tmp_path, monkeypatch):
+    settings = _make_settings(tmp_path, monkeypatch, trust_proxy=True, rate_limit=1, max_concurrent=2)
+    service = type("Service", (), {"settings": settings})()
+    worker = type("Worker", (), {"worker_id": "worker-01", "service": FakeWorkerService()})()
+    client = TestClient(
+        create_chat_ui_app(
+            service=service,
+            pool_manager=FakePoolManager(worker=worker),
+            rate_limiter=UIRateLimiter(per_minute=1, max_concurrent_per_ip=2),
         )
-        with urllib.request.urlopen(request, timeout=5) as response:
-            events = [json.loads(line) for line in response.read().decode("utf-8").splitlines() if line.strip()]
+    )
 
-    assert events[0]["type"] == "error" or events[-1]["type"] == "error" or any(event["type"] == "error" for event in events)
+    first = client.post("/api/ask", json={"question": "first"}, headers={"X-Forwarded-For": "1.1.1.1"})
+    second = client.post("/api/ask", json={"question": "second"}, headers={"X-Forwarded-For": "1.1.1.1"})
+
+    assert first.status_code == 200
+    assert second.status_code == 429
+    assert second.json()["error_code"] == "RATE_LIMITED"
+
+
+def test_chat_ui_empty_question_is_400(tmp_path, monkeypatch):
+    settings = _make_settings(tmp_path, monkeypatch)
+    service = type("Service", (), {"settings": settings})()
+    worker = type("Worker", (), {"worker_id": "worker-01", "service": FakeWorkerService()})()
+    client = TestClient(create_chat_ui_app(service=service, pool_manager=FakePoolManager(worker=worker)))
+
+    response = client.post("/api/ask-stream", json={"question": "   "})
+
+    assert response.status_code == 400
+    assert response.json()["error_code"] == "ASK_TIMEOUT"

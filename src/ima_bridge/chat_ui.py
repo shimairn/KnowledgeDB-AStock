@@ -1,175 +1,234 @@
 from __future__ import annotations
 
-import html
 import json
+import queue
 import threading
 import webbrowser
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
-from typing import Callable
+from typing import Any, Iterator
 
+import uvicorn
+from fastapi import Body, FastAPI, Request
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
+
+from ima_bridge.config import Settings
 from ima_bridge.service import IMAAskService
+from ima_bridge.ui_rate_limit import UIRateLimiter
+from ima_bridge.worker_pool import WorkerPoolManager, WorkerSlot
+
+RETRY_AFTER_SECONDS = 5
 
 
 def _load_asset(name: str) -> str:
     return files("ima_bridge.ui").joinpath(name).read_text(encoding="utf-8")
 
 
-class ChatUIServer(ThreadingHTTPServer):
-    def __init__(self, server_address: tuple[str, int], service: IMAAskService) -> None:
-        super().__init__(server_address, ChatUIRequestHandler)
-        self.service = service
-        self.lock = threading.Lock()
-        self.assets = {
-            "index.html": _load_asset("index.html"),
-            "app.css": _load_asset("app.css"),
-            "app.js": _load_asset("app.js"),
-        }
+def _json_error(error_code: str, error_message: str, status_code: int, **extra: Any) -> JSONResponse:
+    payload = {
+        "ok": False,
+        "error_code": error_code,
+        "error_message": error_message,
+    }
+    payload.update(extra)
+    return JSONResponse(status_code=status_code, content=payload)
 
-    def render_index(self) -> str:
-        kb_label = html.escape(
-            f"{self.service.settings.kb_name} / {self.service.settings.kb_owner} / {self.service.settings.kb_title}"
-        )
-        return self.assets["index.html"].replace("__KB_LABEL__", kb_label)
 
-    def run_json(self, fn: Callable[[], dict]) -> dict:
-        with self.lock:
-            return fn()
+def _busy_response() -> JSONResponse:
+    return _json_error(
+        error_code="BUSY",
+        error_message="No idle worker available",
+        status_code=429,
+        retry_after_seconds=RETRY_AFTER_SECONDS,
+    )
 
-    def run_stream(self, question: str, writer: Callable[[dict], None]) -> None:
-        with self.lock:
-            writer({"type": "start", "question": question})
+
+def _rate_limited_response(retry_after_seconds: int) -> JSONResponse:
+    return _json_error(
+        error_code="RATE_LIMITED",
+        error_message="Too many requests from this IP",
+        status_code=429,
+        retry_after_seconds=retry_after_seconds,
+    )
+
+
+def _extract_question(payload: dict[str, Any] | None) -> str:
+    value = "" if payload is None else payload.get("question", "")
+    return str(value).strip()
+
+
+def _kb_label(settings: Settings) -> str:
+    return f"{settings.kb_name} / {settings.kb_owner} / {settings.kb_title}"
+
+
+def _resolve_client_ip(request: Request, settings: Settings) -> str:
+    if settings.ui_trust_proxy:
+        forwarded_for = request.headers.get("x-forwarded-for", "").strip()
+        if forwarded_for:
+            return forwarded_for.split(",", 1)[0].strip()
+
+    client = request.client.host if request.client is not None else "unknown"
+    return client or "unknown"
+
+
+def _build_stream(
+    worker: WorkerSlot,
+    pool_manager: WorkerPoolManager,
+    rate_limiter: UIRateLimiter,
+    client_ip: str,
+    question: str,
+) -> Iterator[str]:
+    events: queue.Queue[dict[str, Any] | object] = queue.Queue()
+    done_marker = object()
+
+    def runner() -> None:
+        try:
+            events.put({"type": "start", "question": question})
 
             def on_update(delta: str, text: str) -> None:
                 if not delta:
                     return
-                writer({"type": "delta", "delta": delta, "text": text})
+                events.put({"type": "delta", "delta": delta, "text": text})
 
-            response = self.service.ask_with_updates(question=question, on_update=on_update)
-            writer({"type": "done", "response": response.model_dump()})
-
-
-class ChatUIRequestHandler(BaseHTTPRequestHandler):
-    server: ChatUIServer
-
-    def do_GET(self) -> None:
-        if self.path == "/":
-            self._send_text(self.server.render_index(), content_type="text/html; charset=utf-8")
-            return
-        if self.path == "/assets/app.css":
-            self._send_text(self.server.assets["app.css"], content_type="text/css; charset=utf-8")
-            return
-        if self.path == "/assets/app.js":
-            self._send_text(self.server.assets["app.js"], content_type="application/javascript; charset=utf-8")
-            return
-        if self.path == "/api/health":
-            self._run_json(lambda: self.server.service.health().model_dump())
-            return
-        self._send_json({"ok": False, "error": "NOT_FOUND"}, status=404)
-
-    def do_POST(self) -> None:
-        if self.path == "/api/ask":
-            body = self._read_json()
-            question = str(body.get("question", "")).strip()
-            if not question:
-                self._send_json(
-                    {"ok": False, "error_code": "ASK_TIMEOUT", "error_message": "question is required"},
-                    status=400,
-                )
-                return
-            self._run_json(lambda: self.server.service.ask(question).model_dump())
-            return
-        if self.path == "/api/ask-stream":
-            body = self._read_json()
-            question = str(body.get("question", "")).strip()
-            if not question:
-                self._send_json(
-                    {"ok": False, "error_code": "ASK_TIMEOUT", "error_message": "question is required"},
-                    status=400,
-                )
-                return
-            self._run_stream(question)
-            return
-        if self.path == "/api/login":
-            body = self._read_json()
-            timeout = body.get("timeout")
-            timeout_value = float(timeout) if timeout is not None else None
-            self._run_json(lambda: self.server.service.login(timeout_seconds=timeout_value).model_dump())
-            return
-        self._send_json({"ok": False, "error": "NOT_FOUND"}, status=404)
-
-    def log_message(self, format: str, *args) -> None:
-        return
-
-    def _run_json(self, fn: Callable[[], dict]) -> None:
-        try:
-            payload = self.server.run_json(fn)
-            self._send_json(payload)
+            response = worker.service.ask_with_updates(question=question, on_update=on_update)
+            pool_manager.release(worker, response=response)
+            events.put({"type": "done", "response": response.model_dump()})
         except Exception as exc:
-            self._send_json(
+            pool_manager.release(worker, exc=exc)
+            events.put(
                 {
-                    "ok": False,
+                    "type": "error",
                     "error_code": "CAPTURE_FAILED",
                     "error_message": str(exc),
-                },
-                status=500,
+                }
             )
+        finally:
+            rate_limiter.release(client_ip)
+            events.put(done_marker)
 
-    def _run_stream(self, question: str) -> None:
+    threading.Thread(target=runner, daemon=True).start()
+
+    while True:
+        item = events.get()
+        if item is done_marker:
+            break
+        yield json.dumps(item, ensure_ascii=False) + "\n"
+
+
+def create_chat_ui_app(
+    service: IMAAskService,
+    pool_manager: WorkerPoolManager | None = None,
+    rate_limiter: UIRateLimiter | None = None,
+) -> FastAPI:
+    settings = service.settings
+    assets = {
+        "index.html": _load_asset("index.html"),
+        "app.css": _load_asset("app.css"),
+        "app.js": _load_asset("app.js"),
+    }
+    pool = pool_manager or WorkerPoolManager(
+        template_settings=settings,
+        worker_count=settings.ui_worker_count,
+    )
+    limiter = rate_limiter or UIRateLimiter(
+        per_minute=settings.ui_rate_limit_per_minute,
+        max_concurrent_per_ip=settings.ui_max_concurrent_per_ip,
+    )
+
+    app = FastAPI()
+    app.state.settings = settings
+    app.state.service = service
+    app.state.pool_manager = pool
+    app.state.rate_limiter = limiter
+
+    @app.get("/", response_class=HTMLResponse)
+    def index() -> HTMLResponse:
+        return HTMLResponse(assets["index.html"])
+
+    @app.get("/assets/app.css")
+    def asset_css() -> Response:
+        return Response(content=assets["app.css"], media_type="text/css")
+
+    @app.get("/assets/app.js")
+    def asset_js() -> Response:
+        return Response(content=assets["app.js"], media_type="application/javascript")
+
+    @app.get("/api/ui-config")
+    def api_ui_config() -> JSONResponse:
+        summary = pool.summarize()
+        return JSONResponse(
+            {
+                "ok": True,
+                "kb_label": _kb_label(settings),
+                "auth_required": False,
+                "driver_mode": settings.driver_mode,
+                "workers_total": summary.workers_total,
+            }
+        )
+
+    @app.get("/api/health.ok")
+    def api_health_ok() -> JSONResponse:
+        payload = pool.health_payload()
+        return JSONResponse({"ok": bool(payload.get("ok"))})
+
+    @app.get("/api/health")
+    def api_health() -> JSONResponse:
+        return JSONResponse(pool.health_payload())
+
+    @app.post("/api/ask")
+    def api_ask(request: Request, payload: dict[str, Any] | None = Body(default=None)) -> JSONResponse:
+        question = _extract_question(payload)
+        if not question:
+            return _json_error("ASK_TIMEOUT", "question is required", status_code=400)
+
+        client_ip = _resolve_client_ip(request, settings)
+        decision = limiter.try_acquire(client_ip)
+        if not decision.allowed:
+            return _rate_limited_response(decision.retry_after_seconds or 1)
+
+        worker = pool.try_acquire()
+        if worker is None:
+            limiter.release(client_ip)
+            return _busy_response()
+
         try:
-            self.send_response(200)
-            self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            self.server.run_stream(question, self._write_stream)
-        except (BrokenPipeError, ConnectionResetError):
-            return
+            response = worker.service.ask(question)
+            pool.release(worker, response=response)
+            return JSONResponse(response.model_dump())
         except Exception as exc:
-            try:
-                self._write_stream(
-                    {
-                        "type": "error",
-                        "error_code": "CAPTURE_FAILED",
-                        "error_message": str(exc),
-                    }
-                )
-            except Exception:
-                return
+            pool.release(worker, exc=exc)
+            return _json_error("CAPTURE_FAILED", str(exc), status_code=500)
+        finally:
+            limiter.release(client_ip)
 
-    def _read_json(self) -> dict:
-        content_length = int(self.headers.get("Content-Length", "0"))
-        raw = self.rfile.read(content_length) if content_length > 0 else b"{}"
-        try:
-            return json.loads(raw.decode("utf-8"))
-        except Exception:
-            return {}
+    @app.post("/api/ask-stream")
+    def api_ask_stream(request: Request, payload: dict[str, Any] | None = Body(default=None)) -> Response:
+        question = _extract_question(payload)
+        if not question:
+            return _json_error("ASK_TIMEOUT", "question is required", status_code=400)
 
-    def _write_stream(self, payload: dict) -> None:
-        encoded = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
-        self.wfile.write(encoded)
-        self.wfile.flush()
+        client_ip = _resolve_client_ip(request, settings)
+        decision = limiter.try_acquire(client_ip)
+        if not decision.allowed:
+            return _rate_limited_response(decision.retry_after_seconds or 1)
 
-    def _send_text(self, value: str, content_type: str, status: int = 200) -> None:
-        encoded = value.encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(encoded)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(encoded)
+        worker = pool.try_acquire()
+        if worker is None:
+            limiter.release(client_ip)
+            return _busy_response()
 
-    def _send_json(self, payload: dict, status: int = 200) -> None:
-        encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(encoded)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(encoded)
+        return StreamingResponse(
+            _build_stream(
+                worker=worker,
+                pool_manager=pool,
+                rate_limiter=limiter,
+                client_ip=client_ip,
+                question=question,
+            ),
+            media_type="application/x-ndjson",
+            headers={"Cache-Control": "no-store"},
+        )
 
-
-def create_chat_ui_server(service: IMAAskService, host: str, port: int) -> ChatUIServer:
-    return ChatUIServer((host, port), service)
+    return app
 
 
 def run_chat_ui(
@@ -177,16 +236,24 @@ def run_chat_ui(
     host: str,
     port: int,
     open_browser: bool,
+    workers: int | None = None,
 ) -> int:
-    server = create_chat_ui_server(service=service, host=host, port=port)
-    url = f"http://{host}:{server.server_address[1]}/"
+    if service.settings.driver_mode != "web":
+        print("ui concurrent service only supports --driver web")
+        return 2
+
+    pool_manager = WorkerPoolManager(
+        template_settings=service.settings,
+        worker_count=workers if workers is not None else service.settings.ui_worker_count,
+    )
+    pool_manager.refresh_all()
+    app = create_chat_ui_app(service=service, pool_manager=pool_manager)
+
+    browser_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+    url = f"http://{browser_host}:{port}/"
     print(f"ui running: {url}")
     if open_browser:
         webbrowser.open(url)
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        server.server_close()
+
+    uvicorn.run(app, host=host, port=port, log_level="warning")
     return 0

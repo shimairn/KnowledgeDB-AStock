@@ -20,6 +20,7 @@ class AskResponse(BaseModel):
     mode: str
     model: str
     source_driver: Literal["app", "web"] = "web"
+    thinking_text: str = ""
     answer_text: str = ""
     answer_html: str = ""
     references: list[str] = Field(default_factory=list)

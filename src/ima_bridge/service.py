@@ -124,7 +124,7 @@ class IMAAskService:
     def ask_with_updates(
         self,
         question: str,
-        on_update: Callable[[str, str], None] | None = None,
+        on_update: Callable[..., None] | None = None,
     ) -> AskResponse:
         kb = KnowledgeBaseIdentity(name=self.settings.kb_name, owner=self.settings.kb_owner, title=self.settings.kb_title)
         base = AskResponse(
@@ -142,6 +142,7 @@ class IMAAskService:
                 update={
                     "ok": True,
                     "source_driver": result.source_driver,
+                    "thinking_text": result.thinking_text,
                     "answer_text": result.answer_text,
                     "answer_html": result.answer_html,
                     "references": result.references,

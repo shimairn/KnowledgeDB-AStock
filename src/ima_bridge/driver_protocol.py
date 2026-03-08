@@ -36,6 +36,7 @@ class DriverLoginStatus:
 @dataclass(frozen=True)
 class DriverAskResult:
     source_driver: DriverSource
+    thinking_text: str = ""
     answer_text: str = ""
     answer_html: str = ""
     references: list[str] = field(default_factory=list)
@@ -54,6 +55,6 @@ class AskDriver(Protocol):
     def ask(
         self,
         question: str,
-        on_update: Callable[[str, str], None] | None = None,
+        on_update: Callable[..., None] | None = None,
     ) -> DriverAskResult:
         ...
