@@ -1,0 +1,28 @@
+- generic [ref=e2]:
+  - banner [ref=e3]:
+    - generic [ref=e6]:
+      - generic [ref=e7]: ima
+      - heading "爱分享 / 购物小助手 / 【爱分享】的财经资讯" [level=1] [ref=e8]
+    - status [ref=e9]:
+      - generic [ref=e11]: 已连接
+  - main [ref=e12]:
+    - generic [ref=e13]:
+      - generic [ref=e14]:
+        - heading "开始提问" [level=2] [ref=e16]
+        - paragraph [ref=e17]: 围绕当前知识库直接提问，回答会以富文本连续呈现。
+        - generic [ref=e18]:
+          - generic [ref=e19]:
+            - generic [ref=e20]: 服务已就绪
+            - generic [ref=e21]: 2/2
+          - paragraph [ref=e24]: 已连接到知识库，可直接开始提问。
+      - log [ref=e25]
+    - generic [ref=e28]:
+      - generic [ref=e29]: 输入问题
+      - textbox "输入问题" [active] [ref=e30]:
+        - /placeholder: 有问题尽管问
+      - generic [ref=e31]:
+        - button "DeepSeek V3.2 Think" [ref=e34] [cursor=pointer]:
+          - generic [ref=e35]: DeepSeek V3.2 Think
+          - generic [ref=e36]: ▾
+        - button "发送" [disabled] [ref=e37]:
+          - generic [ref=e38]: ↑

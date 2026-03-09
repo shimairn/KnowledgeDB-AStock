@@ -1,0 +1,28 @@
+- generic [ref=e2]:
+  - banner [ref=e3]:
+    - generic [ref=e6]:
+      - generic [ref=e7]: ima
+      - heading "爱分享 / 购物小助手 / 【爱分享】的财经资讯" [level=1] [ref=e8]
+    - status [ref=e9]:
+      - generic [ref=e11]: 已连接·1/2 就绪
+  - main [ref=e12]:
+    - generic [ref=e13]:
+      - generic [ref=e14]:
+        - heading "开始提问" [level=2] [ref=e16]
+        - paragraph [ref=e17]: 服务正在初始化，首个 worker 就绪后即可开始提问。
+        - generic [ref=e18]:
+          - generic [ref=e19]:
+            - generic [ref=e20]: 服务已就绪
+            - generic [ref=e21]: 1/2
+          - paragraph [ref=e24]: 已就绪 1/2，其余 worker 正在预热，可直接开始提问。
+      - log [ref=e25]
+    - generic [ref=e28]:
+      - generic [ref=e29]: 输入问题
+      - textbox "输入问题" [active] [ref=e30]:
+        - /placeholder: 有问题尽管问
+      - generic [ref=e31]:
+        - button "DeepSeek V3.2 Think" [ref=e34] [cursor=pointer]:
+          - generic [ref=e35]: DeepSeek V3.2 Think
+          - generic [ref=e36]: ▾
+        - button "发送" [disabled] [ref=e37]:
+          - generic [ref=e38]: ↑

@@ -41,12 +41,13 @@ class WebAskDriver:
         context = self.session.launch_context(playwright, headless=headless)
         try:
             page = self.session.acquire_page(context)
+            if self.kb_navigator.try_open_remembered_target(page):
+                return True, None, None
+
             self.session.open_home(page)
             text = self.session.body_text(page)
             if self.kb_navigator.is_login_required(text):
                 return False, "LOGIN_REQUIRED", "Web profile requires login. Run `python -m ima_bridge login` once."
-            if self.kb_navigator.try_open_remembered_target(page):
-                return True, None, None
             if self.kb_navigator.confirm_target_context(page):
                 return True, None, None
 

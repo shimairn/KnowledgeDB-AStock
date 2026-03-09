@@ -1,0 +1,169 @@
+- generic [ref=e2]:
+  - banner [ref=e3]:
+    - generic [ref=e6]:
+      - generic [ref=e7]: ima
+      - heading "爱分享 / 购物小助手 / 【爱分享】的财经资讯" [level=1] [ref=e8]
+    - status [ref=e9]:
+      - generic [ref=e11]: 已连接
+  - main [ref=e12]:
+    - log [ref=e25]:
+      - article [ref=e39]:
+        - paragraph [ref=e43]: 帮我用三句话介绍这
+      - article [ref=e44]:
+        - generic [ref=e45]:
+          - group [ref=e59]:
+            - generic "思考过程 默认折叠，不进入正文 已完成" [ref=e60] [cursor=pointer]:
+              - generic [ref=e61]:
+                - generic [ref=e62]: 思考过程
+                - generic [ref=e63]: 默认折叠，不进入正文
+              - generic [ref=e64]: 已完成
+          - article [ref=e66]:
+            - generic [ref=e67]:
+              - paragraph [ref=e68]: 根据您提供的全部文档（截至2026年3月9日），结合当前市场信息，今日（2026年3月9日前后）市场的主要关注和“吹票”方向可清晰归纳为以下三条主线：
+              - heading "核心结论" [level=3] [ref=e69]
+              - paragraph [ref=e70]:
+                - text: 今日市场焦点集中于半导体行业内部，由
+                - strong [ref=e71]: “涨价”
+                - text: 和
+                - strong [ref=e72]: “扩产”
+                - text: 两大核心逻辑驱动，具体围绕
+                - strong [ref=e73]: 存储芯片、半导体设备、先进封装
+                - text: 三大板块展开。
+              - separator [ref=e74]
+              - heading "主线一：存储芯片 —— “涨价周期”的绝对核心" [level=3] [ref=e75]
+              - paragraph [ref=e76]: 这是当前市场情绪最高、逻辑最直接的板块。
+              - list [ref=e77]:
+                - listitem [ref=e78]:
+                  - strong [ref=e79]: 核心逻辑
+                  - text: ：
+                  - strong [ref=e80]: AI算力需求（尤其是HBM）导致供需严重错配，价格持续超预期上涨。
+                - listitem [ref=e81]:
+                  - strong [ref=e82]: 最新催化剂
+                  - text: ：
+                  - list [ref=e83]:
+                    - listitem [ref=e84]:
+                      - strong [ref=e85]: 汇丰报告
+                      - text: （3月6日）：明确指出AI推理需求进一步推动存储芯片价格上涨。
+                    - listitem [ref=e86]:
+                      - strong [ref=e87]: 瑞银月度报告
+                      - text: （3月2日）：上调存储合约价预测，认为供不应求态势可能延续至2027年后。
+                    - listitem [ref=e88]:
+                      - strong [ref=e89]: 行业数据
+                      - text: ：DDR5、HBM等高端产品价格强势，合约价预期持续环比大涨。
+                - listitem [ref=e90]:
+                  - strong [ref=e91]: 市场关注点
+                  - text: ：存储原厂（三星、海力士、美光）的盈利能力提升，以及产业链相关公司。
+              - heading "主线二：半导体设备 —— “扩产周期”与“国产替代”的交汇点" [level=3] [ref=e92]
+              - paragraph [ref=e93]: 这是具备中长期逻辑的板块，今日因产业高景气度而强化。
+              - list [ref=e94]:
+                - listitem [ref=e95]:
+                  - strong [ref=e96]: 核心逻辑
+                  - text: ：下游晶圆厂（尤其是国内头部厂）
+                  - strong [ref=e97]: 产能饱满、扩产意愿强烈
+                  - text: ，直接拉动设备订单。
+                - listitem [ref=e98]:
+                  - strong [ref=e99]: 最新催化剂
+                  - text: ：
+                  - list [ref=e100]:
+                    - listitem [ref=e101]:
+                      - strong [ref=e102]: 产业调研
+                      - text: （3月5日）：有设备供应商表示机械划片设备
+                      - strong [ref=e103]: 持续满产
+                      - text: ，客户提货速度和提货量延续。
+                    - listitem [ref=e104]:
+                      - strong [ref=e105]: 政策与资本开支
+                      - text: ：台积电大幅上调2026年资本开支指引；国内“设备更新贴息”政策支持领域扩展至电子信息行业。
+                    - listitem [ref=e106]:
+                      - strong [ref=e107]: 订单可见度
+                      - text: ：多家机构指出，国内设备公司订单能见度已大幅提升，2026年增长确定性强。
+                - listitem [ref=e108]:
+                  - strong [ref=e109]: 市场关注点
+                  - text: ：
+                  - strong [ref=e110]: 卡位先进制程和存储产线
+                  - text: 的设备龙头，以及正在
+                  - strong [ref=e111]: 突破关键“卡脖子”环节
+                  - text: （如量测、零部件）的公司。
+              - heading "主线三：先进封装与功率半导体 —— 产业延伸与扩散" [level=3] [ref=e112]
+              - paragraph [ref=e113]: 这是主线逻辑向外扩散的支线，同样具备强劲动力。
+              - list [ref=e114]:
+                - listitem [ref=e115]:
+                  - strong [ref=e116]: 先进封装核心逻辑
+                  - text: ：为满足AI芯片需求，
+                  - strong [ref=e117]: CoWoS等先进封装产能成为新瓶颈
+                  - text: ，设备与材料需求迫切。
+                - listitem [ref=e118]:
+                  - strong [ref=e119]: 功率半导体核心逻辑
+                  - text: ：
+                  - strong [ref=e120]: 涨价潮扩散
+                  - text: 。AI服务器、新能源车、储能等领域需求旺盛，导致英飞凌、士兰微等国内外大厂纷纷发布涨价函。
+                - listitem [ref=e121]:
+                  - strong [ref=e122]: 最新催化剂
+                  - text: ：
+                  - list [ref=e123]:
+                    - listitem [ref=e124]: 台积电资本开支重点投向先进封装产能。
+                    - listitem [ref=e125]: 多家功率半导体厂商宣布自2026年Q1起涨价10%-20%。
+              - heading "风险提示" [level=3] [ref=e126]
+              - list [ref=e127]:
+                - listitem [ref=e128]:
+                  - strong [ref=e129]: 情绪过热
+                  - text: ：短期涨幅过大，部分个股估值已处于历史高位（如文档指出半导体板块PE分位数达97.85%），需警惕回调风险。
+                - listitem [ref=e130]:
+                  - strong [ref=e131]: 逻辑验证
+                  - text: ：“涨价”和“扩产”逻辑需要后续季度财报的持续验证，一旦需求不及预期，股价波动会加剧。
+                - listitem [ref=e132]:
+                  - strong [ref=e133]: 地缘政治
+                  - text: ：外部技术管制风险始终存在，可能影响供应链和扩产进度。
+              - heading "总结与操作思路" [level=3] [ref=e134]
+              - table [ref=e135]:
+                - rowgroup [ref=e136]:
+                  - row "方向 核心逻辑 市场阶段 建议关注点" [ref=e137]:
+                    - columnheader "方向" [ref=e138]
+                    - columnheader "核心逻辑" [ref=e139]
+                    - columnheader "市场阶段" [ref=e140]
+                    - columnheader "建议关注点" [ref=e141]
+                - rowgroup [ref=e142]:
+                  - row "存储芯片 价格驱动，弹性最大 情绪高潮期 紧盯现货/合约价格数据及龙头厂商业绩指引" [ref=e143]:
+                    - cell "存储芯片" [ref=e144]:
+                      - strong [ref=e145]: 存储芯片
+                    - cell "价格驱动，弹性最大" [ref=e146]:
+                      - strong [ref=e147]: 价格驱动
+                      - text: ，弹性最大
+                    - cell "情绪高潮期" [ref=e148]:
+                      - strong [ref=e149]: 情绪高潮期
+                    - cell "紧盯现货/合约价格数据及龙头厂商业绩指引" [ref=e150]
+                  - row "半导体设备 订单驱动，确定性最强 业绩兑现期 跟踪晶圆厂资本开支、设备公司订单及营收增速" [ref=e151]:
+                    - cell "半导体设备" [ref=e152]:
+                      - strong [ref=e153]: 半导体设备
+                    - cell "订单驱动，确定性最强" [ref=e154]:
+                      - strong [ref=e155]: 订单驱动
+                      - text: ，确定性最强
+                    - cell "业绩兑现期" [ref=e156]:
+                      - strong [ref=e157]: 业绩兑现期
+                    - cell "跟踪晶圆厂资本开支、设备公司订单及营收增速" [ref=e158]
+                  - row "先进封装/功率 需求扩散，逻辑延伸 主题发酵期 关注产能建设进度和涨价函的落地情况" [ref=e159]:
+                    - cell "先进封装/功率" [ref=e160]:
+                      - strong [ref=e161]: 先进封装/功率
+                    - cell "需求扩散，逻辑延伸" [ref=e162]:
+                      - strong [ref=e163]: 需求扩散
+                      - text: ，逻辑延伸
+                    - cell "主题发酵期" [ref=e164]:
+                      - strong [ref=e165]: 主题发酵期
+                    - cell "关注产能建设进度和涨价函的落地情况" [ref=e166]
+              - paragraph [ref=e167]:
+                - strong [ref=e168]: 总的来说，今天市场的“吹票”是一个从
+                - text: 存储芯片涨价
+                - strong [ref=e169]: 这一核心点出发，向产业链上下游（设备、封装）和相邻领域（功率半导体）进行逻辑扩散的过程。
+                - text: 投资者应优先关注逻辑最硬、数据最透明的存储和设备主线，同时对扩散方向的持续性保持观察。
+    - generic [ref=e28]:
+      - generic [ref=e29]: 输入问题
+      - textbox "输入问题" [active] [ref=e30]:
+        - /placeholder: 有问题尽管问
+        - text: 个知识库。
+      - generic [ref=e31]:
+        - generic [ref=e32]:
+          - button "DeepSeek V3.2 Think" [ref=e34] [cursor=pointer]:
+            - generic [ref=e35]: DeepSeek V3.2 Think
+            - generic [ref=e36]: ▾
+          - button "新建对话" [ref=e57] [cursor=pointer]
+        - button "发送" [ref=e37]:
+          - generic [ref=e38]: ↑

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 import json
 import queue
 import threading
@@ -20,6 +21,9 @@ from ima_bridge.ui_rate_limit import UIRateLimiter
 from ima_bridge.worker_pool import WorkerPoolManager, WorkerSlot
 
 RETRY_AFTER_SECONDS = 5
+ASSET_CACHE_CONTROL = "public, max-age=3600"
+STARTUP_POLL_INTERVAL_MS = 1500
+STEADY_POLL_INTERVAL_MS = 15000
 UI_ASSET_NAMES = (
     "index.html",
     "app.css",
@@ -86,6 +90,15 @@ def _busy_response() -> JSONResponse:
         error_code="BUSY",
         error_message="No idle worker available",
         status_code=429,
+        retry_after_seconds=RETRY_AFTER_SECONDS,
+    )
+
+
+def _warming_response() -> JSONResponse:
+    return _json_error(
+        error_code="WARMING_UP",
+        error_message="Workers are still initializing",
+        status_code=503,
         retry_after_seconds=RETRY_AFTER_SECONDS,
     )
 
@@ -187,6 +200,9 @@ def _acquire_ui_worker(
     worker = pool.try_acquire()
     if worker is None:
         limiter.release(client_ip)
+        pool_health = pool.health_payload()
+        if pool_health.get("status") == "warming" or pool_health.get("error_code") == "WARMING_UP":
+            return None, None, _warming_response()
         return None, None, _busy_response()
 
     return (
@@ -263,7 +279,14 @@ def create_chat_ui_app(
         max_concurrent_per_ip=settings.ui_max_concurrent_per_ip,
     )
 
-    app = FastAPI()
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        refresh = getattr(pool, "refresh_in_background", None)
+        if callable(refresh):
+            refresh()
+        yield
+
+    app = FastAPI(lifespan=lifespan)
     app.state.settings = settings
     app.state.service = service
     app.state.pool_manager = pool
@@ -280,12 +303,13 @@ def create_chat_ui_app(
         media_type = _asset_media_type(normalized_name)
         if content is None or media_type is None:
             return Response(status_code=404)
-        return Response(content=content, media_type=media_type, headers={"Cache-Control": "no-store"})
+        return Response(content=content, media_type=media_type, headers={"Cache-Control": ASSET_CACHE_CONTROL})
 
     @app.get("/api/ui-config")
     def api_ui_config() -> JSONResponse:
         summary = pool.summarize()
         model_catalog = pool.get_model_catalog()
+        health = pool.health_payload()
         return JSONResponse(
             {
                 "ok": True,
@@ -293,6 +317,9 @@ def create_chat_ui_app(
                 "auth_required": False,
                 "driver_mode": settings.driver_mode,
                 "workers_total": summary.workers_total,
+                "health": health,
+                "startup_poll_interval_ms": STARTUP_POLL_INTERVAL_MS,
+                "steady_poll_interval_ms": STEADY_POLL_INTERVAL_MS,
                 **model_catalog.model_dump(),
             }
         )
@@ -363,9 +390,8 @@ def run_chat_ui(
         worker_count=workers if workers is not None else service.settings.ui_worker_count,
     )
     pool_manager.seed_profiles_from(service.settings)
+    pool_manager.refresh_in_background()
     app = create_chat_ui_app(service=service, pool_manager=pool_manager)
-
-    threading.Thread(target=pool_manager.refresh_all, daemon=True).start()
 
     browser_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
     url = f"http://{browser_host}:{port}/"

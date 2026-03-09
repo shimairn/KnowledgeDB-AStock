@@ -18,7 +18,7 @@ const BRAND_TEXT_PATTERNS = [
 ];
 const AUXILIARY_ATTR_RE =
   /(think|reason|analysis|thought|source|reference|citation|drawer|toolbar|popover|tooltip|menu|tab|legend|axis|chart|graph|echarts|watermark|context|inline-search|indexwrapper)/i;
-const DECORATIVE_ATTR_RE = /(icon|logo|brand|avatar|badge|emoji|watermark|ima)/i;
+const DECORATIVE_ATTR_RE = /(icon|logo|brand|avatar|badge|emoji|watermark)/i;
 const FILE_REFERENCE_RE = /\.(?:pdf|docx?|xlsx?|pptx?|png|jpe?g)\b/i;
 const ATTRIBUTE_ALLOWLIST = {
   a: new Set(["href", "target", "rel", "title"]),
@@ -43,7 +43,7 @@ export const ANSWER_SURFACE_STYLE_TEXT = `
 
   .answer-doc {
     color: var(--text, #111827);
-    font: 400 15.5px/1.95 "Segoe UI Variable", "PingFang SC", "Microsoft YaHei", sans-serif;
+    font: 400 15.5px/1.9 "Bahnschrift", "Segoe UI Variable", "PingFang SC", "Microsoft YaHei", sans-serif;
     letter-spacing: -0.01em;
     word-break: break-word;
   }
@@ -108,9 +108,9 @@ export const ANSWER_SURFACE_STYLE_TEXT = `
 
   .answer-doc blockquote {
     padding: 10px 16px;
-    border-inline-start: 2px solid rgba(15, 23, 42, 0.14);
+    border-inline-start: 2px solid rgba(15, 23, 42, 0.18);
     border-radius: 0 16px 16px 0;
-    background: rgba(255, 255, 255, 0.6);
+    background: rgba(248, 243, 235, 0.8);
     color: var(--muted-strong, #475569);
   }
 
@@ -118,11 +118,11 @@ export const ANSWER_SURFACE_STYLE_TEXT = `
     padding: 14px 16px;
     border: 1px solid rgba(15, 23, 42, 0.08);
     border-radius: 16px;
-    background: rgba(255, 255, 255, 0.82);
+    background: rgba(248, 243, 235, 0.92);
     overflow-x: auto;
     white-space: pre-wrap;
     word-break: break-word;
-    box-shadow: 0 10px 24px rgba(15, 23, 42, 0.04);
+    box-shadow: 0 12px 28px rgba(15, 23, 42, 0.05);
   }
 
   .answer-doc code {
@@ -143,7 +143,7 @@ export const ANSWER_SURFACE_STYLE_TEXT = `
     margin: 18px 0;
     border-radius: 18px;
     background: rgba(255, 255, 255, 0.92);
-    box-shadow: 0 18px 38px rgba(15, 23, 42, 0.08);
+    box-shadow: 0 22px 44px rgba(15, 23, 42, 0.1);
   }
 
   .answer-doc figure {
@@ -164,7 +164,7 @@ export const ANSWER_SURFACE_STYLE_TEXT = `
     overflow: hidden;
     border: 1px solid rgba(15, 23, 42, 0.08);
     border-radius: 16px;
-    background: rgba(255, 255, 255, 0.84);
+    background: rgba(255, 252, 248, 0.94);
   }
 
   .answer-doc th,
@@ -530,7 +530,7 @@ function isDecorativeMediaElement(element) {
   }
 
   const attrs = normalizeWhitespace(
-    `${element.className || ""} ${element.id || ""} ${element.getAttribute("alt") || ""} ${element.getAttribute("aria-label") || ""} ${element.getAttribute("title") || ""} ${element.getAttribute("src") || ""}`,
+    `${element.className || ""} ${element.id || ""} ${element.getAttribute("alt") || ""} ${element.getAttribute("aria-label") || ""} ${element.getAttribute("title") || ""}`,
   );
   if (DECORATIVE_ATTR_RE.test(attrs)) {
     return true;

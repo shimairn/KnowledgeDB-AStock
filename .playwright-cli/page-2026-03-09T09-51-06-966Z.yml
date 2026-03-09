@@ -1,0 +1,29 @@
+- generic [ref=e2]:
+  - banner [ref=e3]:
+    - generic [ref=e6]:
+      - generic [ref=e7]: ima
+      - heading "爱分享 / 购物小助手 / 【爱分享】的财经资讯" [level=1] [ref=e8]
+    - status [ref=e9]:
+      - generic [ref=e11]: 正在生成回答
+  - main [ref=e12]:
+    - log [ref=e25]:
+      - article [ref=e39]:
+        - paragraph [ref=e43]: 帮我用三句话介绍这
+      - article [ref=e44]:
+        - generic [ref=e46]:
+          - generic [ref=e49]: 正在整理思路
+          - generic [ref=e52]: 正在整理回答结构
+    - generic [ref=e28]:
+      - generic [ref=e29]: 输入问题
+      - textbox "输入问题" [active] [ref=e30]:
+        - /placeholder: 有问题尽管问
+        - text: 个知识库。
+      - generic [ref=e31]:
+        - generic [ref=e32]:
+          - generic:
+            - button "DeepSeek V3.2 Think":
+              - generic: DeepSeek V3.2 Think
+              - generic: ▾
+          - button "新建对话" [disabled] [ref=e57]
+        - button "发送" [disabled] [ref=e37]:
+          - generic [ref=e38]: ↑

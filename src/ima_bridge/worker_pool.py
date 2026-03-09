@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from threading import Lock
+from threading import Lock, Thread
 from typing import Callable, Literal
 
 from ima_bridge.config import Settings, get_settings
@@ -11,7 +11,7 @@ from ima_bridge.profile_sync import sync_profile_state
 from ima_bridge.schemas import AskResponse, HealthResponse
 from ima_bridge.service import IMAAskService
 
-WorkerStatus = Literal["ready", "busy", "login_required", "error"]
+WorkerStatus = Literal["warming", "ready", "busy", "login_required", "error"]
 
 
 @dataclass
@@ -19,7 +19,7 @@ class WorkerSlot:
     worker_id: str
     settings: Settings
     service: IMAAskService
-    status: WorkerStatus = "error"
+    status: WorkerStatus = "warming"
     last_error_code: str | None = None
     last_error_message: str | None = None
 
@@ -27,6 +27,7 @@ class WorkerSlot:
 @dataclass(frozen=True)
 class PoolHealthSummary:
     workers_total: int
+    workers_warming: int
     workers_ready: int
     workers_busy: int
     workers_login_required: int
@@ -36,6 +37,7 @@ class PoolHealthSummary:
     def model_dump(self) -> dict:
         return {
             "workers_total": self.workers_total,
+            "workers_warming": self.workers_warming,
             "workers_ready": self.workers_ready,
             "workers_busy": self.workers_busy,
             "workers_login_required": self.workers_login_required,
@@ -56,6 +58,7 @@ class WorkerPoolManager:
         self._service_factory = service_factory or (lambda settings: IMAAskService(settings=settings))
         self._lock = Lock()
         self._cached_model_catalog = self._fallback_model_catalog()
+        self._refresh_in_progress = False
         self._workers = [self._build_worker_slot(index=index) for index in range(1, self.worker_count + 1)]
 
     @property
@@ -86,6 +89,31 @@ class WorkerPoolManager:
             futures = [executor.submit(self.refresh_worker, worker) for worker in refreshable_workers]
             for future in futures:
                 future.result()
+
+    def refresh_in_background(self, *, eager_worker_count: int = 1) -> bool:
+        refreshable_workers = [worker for worker in self._workers if worker.status != "busy"]
+        if not refreshable_workers:
+            return False
+
+        with self._lock:
+            if self._refresh_in_progress:
+                return False
+            self._refresh_in_progress = True
+            for worker in refreshable_workers:
+                if worker.status != "ready":
+                    worker.status = "warming"
+                    worker.last_error_code = None
+                    worker.last_error_message = None
+
+        def runner() -> None:
+            try:
+                self._refresh_startup_workers(refreshable_workers, eager_worker_count=eager_worker_count)
+            finally:
+                with self._lock:
+                    self._refresh_in_progress = False
+
+        Thread(target=runner, name="ima-worker-warmup", daemon=True).start()
+        return True
 
     def refresh_worker(self, worker: WorkerSlot) -> WorkerStatus:
         health = worker.service.health()
@@ -125,12 +153,14 @@ class WorkerPoolManager:
             return worker.status
 
     def summarize(self) -> PoolHealthSummary:
+        warming = sum(worker.status == "warming" for worker in self._workers)
         ready = sum(worker.status == "ready" for worker in self._workers)
         busy = sum(worker.status == "busy" for worker in self._workers)
         login_required = sum(worker.status == "login_required" for worker in self._workers)
         error = sum(worker.status == "error" for worker in self._workers)
         return PoolHealthSummary(
             workers_total=len(self._workers),
+            workers_warming=warming,
             workers_ready=ready,
             workers_busy=busy,
             workers_login_required=login_required,
@@ -140,21 +170,36 @@ class WorkerPoolManager:
 
     def health_payload(self) -> dict:
         summary = self.summarize()
+        refresh_in_progress = self._refresh_in_progress
         error_code: str | None = None
         error_message: str | None = None
+        warming_up = bool(summary.workers_warming or refresh_in_progress)
+        status = "ready" if summary.capacity_available else "error"
         if not summary.capacity_available:
-            if summary.workers_busy > 0:
+            if warming_up:
+                status = "warming"
+                error_code = "WARMING_UP"
+                error_message = "Workers are still initializing"
+            elif summary.workers_busy > 0:
+                status = "busy"
                 error_code = "BUSY"
                 error_message = "No idle worker available"
             elif summary.workers_login_required > 0:
+                status = "login_required"
                 error_code = "LOGIN_REQUIRED"
                 error_message = "All workers require login"
             else:
+                status = "error"
                 error_code = "CAPTURE_FAILED"
                 error_message = "No healthy worker available"
+        elif summary.workers_busy >= summary.workers_total and summary.workers_total > 0:
+            status = "busy"
 
         return {
             "ok": summary.capacity_available,
+            "status": status,
+            "warming_up": warming_up,
+            "refresh_in_progress": refresh_in_progress,
             "instance": "pool",
             "source_driver": "web",
             "cdp_port": None,
@@ -170,6 +215,26 @@ class WorkerPoolManager:
             "pool": summary.model_dump(),
         }
 
+    def _refresh_startup_workers(self, workers: list[WorkerSlot], *, eager_worker_count: int) -> None:
+        if not workers:
+            return
+
+        eager_count = max(1, min(eager_worker_count, len(workers)))
+        eager_workers = workers[:eager_count]
+        remaining_workers = workers[eager_count:]
+
+        for worker in eager_workers:
+            self.refresh_worker(worker)
+
+        if not remaining_workers:
+            return
+
+        max_workers = min(len(remaining_workers), max(1, min(4, len(remaining_workers))))
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="ima-health") as executor:
+            futures = [executor.submit(self.refresh_worker, worker) for worker in remaining_workers]
+            for future in futures:
+                future.result()
+
     def iter_login_services(self) -> list[WorkerSlot]:
         return list(self._workers)
 
@@ -178,7 +243,7 @@ class WorkerPoolManager:
         seeded = 0
         for worker in self._workers:
             if sync_profile_state(source, worker.settings):
-                worker.status = "error"
+                worker.status = "warming"
                 worker.last_error_code = None
                 worker.last_error_message = None
                 seeded += 1

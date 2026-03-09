@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from ima_bridge.config import get_settings
@@ -92,6 +93,24 @@ def test_worker_pool_acquire_release_and_busy(tmp_path, monkeypatch):
     assert summary.workers_ready == 1
     assert summary.workers_error == 1
     assert summary.capacity_available is True
+
+
+def test_worker_pool_health_payload_reports_warming_before_refresh(tmp_path, monkeypatch):
+    _configure_env(tmp_path, monkeypatch)
+    template_settings = get_settings(instance="template", driver_mode="web")
+    manager = WorkerPoolManager(
+        template_settings=template_settings,
+        worker_count=2,
+        service_factory=lambda settings: FakeService(settings),
+    )
+
+    payload = manager.health_payload()
+
+    assert payload["ok"] is False
+    assert payload["status"] == "warming"
+    assert payload["warming_up"] is True
+    assert payload["error_code"] == "WARMING_UP"
+    assert payload["pool"]["workers_warming"] == 2
 
 
 def test_worker_pool_status_transitions(tmp_path, monkeypatch):
@@ -198,3 +217,26 @@ def test_worker_pool_caches_model_catalog_during_refresh(tmp_path, monkeypatch):
 
     worker_after = manager.try_acquire()
     assert worker_after is worker
+
+
+def test_worker_pool_refresh_in_background_warms_workers(tmp_path, monkeypatch):
+    _configure_env(tmp_path, monkeypatch)
+    template_settings = get_settings(instance="template", driver_mode="web")
+    manager = WorkerPoolManager(
+        template_settings=template_settings,
+        worker_count=2,
+        service_factory=lambda settings: FakeService(settings),
+    )
+
+    assert manager.refresh_in_background() is True
+
+    for _ in range(100):
+        payload = manager.health_payload()
+        if payload["ok"] and not payload["refresh_in_progress"]:
+            break
+        time.sleep(0.01)
+    else:
+        raise AssertionError("background warmup did not finish")
+
+    assert payload["status"] == "ready"
+    assert payload["pool"]["workers_ready"] == 2

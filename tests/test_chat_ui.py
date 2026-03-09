@@ -115,6 +115,9 @@ class FakePoolManager:
         self.refresh_calls = 0
         self.payload = payload or {
             "ok": True,
+            "status": "ready",
+            "warming_up": False,
+            "refresh_in_progress": False,
             "instance": "pool",
             "source_driver": "web",
             "cdp_port": None,
@@ -129,6 +132,7 @@ class FakePoolManager:
             "error_message": None,
             "pool": {
                 "workers_total": 1,
+                "workers_warming": 0,
                 "workers_ready": 1,
                 "workers_busy": 0,
                 "workers_login_required": 0,
@@ -184,6 +188,8 @@ def test_chat_ui_serves_static_index_and_assets(tmp_path, monkeypatch):
     assert 'id="jumpToLatestBtn"' in index_response.text
     assert 'id="modelMenu"' in index_response.text
     assert 'id="modelMenuList"' in index_response.text
+    assert 'id="startupPanel"' in index_response.text
+    assert 'id="startupBar"' in index_response.text
     assert 'id="appSidebar"' not in index_response.text
     assert 'id="sidebarToggleBtn"' not in index_response.text
     assert 'id="sourceDrawer"' not in index_response.text
@@ -210,6 +216,8 @@ def test_chat_ui_serves_static_index_and_assets(tmp_path, monkeypatch):
     assert "modelMenu" in main_response.text
     assert "jumpToLatestBtn" in main_response.text
     assert "hasPendingConversationUpdate" in main_response.text
+    assert "scheduleHealthRefresh" in main_response.text
+    assert "applyHealthPayload" in main_response.text
     assert "createMessageRenderer" in main_response.text
     assert "prepareAnswerRender" in render_response.text
     assert "ANSWER_SURFACE_STYLE_TEXT" in render_response.text
@@ -239,6 +247,9 @@ def test_chat_ui_ui_config_and_health_are_anonymous(tmp_path, monkeypatch):
     assert config_response.status_code == 200
     assert config_response.json()["auth_required"] is False
     assert config_response.json()["workers_total"] == 1
+    assert config_response.json()["health"]["status"] == "ready"
+    assert config_response.json()["startup_poll_interval_ms"] > 0
+    assert config_response.json()["steady_poll_interval_ms"] > config_response.json()["startup_poll_interval_ms"]
     assert settings.kb_name in config_response.json()["kb_label"]
     assert config_response.json()["current_model"] == "DeepSeek V3.2 Think"
     assert config_response.json()["model_options"][0]["label"] == "DeepSeek V3.2 Think"
@@ -401,6 +412,9 @@ def test_chat_ui_busy_returns_429(tmp_path, monkeypatch):
         worker=None,
         payload={
             "ok": False,
+            "status": "busy",
+            "warming_up": False,
+            "refresh_in_progress": False,
             "instance": "pool",
             "source_driver": "web",
             "cdp_port": None,
@@ -415,6 +429,7 @@ def test_chat_ui_busy_returns_429(tmp_path, monkeypatch):
             "error_message": "No idle worker available",
             "pool": {
                 "workers_total": 1,
+                "workers_warming": 0,
                 "workers_ready": 0,
                 "workers_busy": 1,
                 "workers_login_required": 0,
@@ -429,6 +444,47 @@ def test_chat_ui_busy_returns_429(tmp_path, monkeypatch):
 
     assert response.status_code == 429
     assert response.json()["error_code"] == "BUSY"
+
+
+def test_chat_ui_warming_up_returns_503(tmp_path, monkeypatch):
+    settings = _make_settings(tmp_path, monkeypatch)
+    service = type("Service", (), {"settings": settings})()
+    pool = FakePoolManager(
+        worker=None,
+        payload={
+            "ok": False,
+            "status": "warming",
+            "warming_up": True,
+            "refresh_in_progress": True,
+            "instance": "pool",
+            "source_driver": "web",
+            "cdp_port": None,
+            "cdp_endpoint": None,
+            "cdp_ready": None,
+            "base_url": "https://ima.qq.com/",
+            "profile_dir": None,
+            "headless": True,
+            "app_executable": None,
+            "managed_profile_dir": "managed",
+            "error_code": "WARMING_UP",
+            "error_message": "Workers are still initializing",
+            "pool": {
+                "workers_total": 1,
+                "workers_warming": 1,
+                "workers_ready": 0,
+                "workers_busy": 0,
+                "workers_login_required": 0,
+                "workers_error": 0,
+                "capacity_available": False,
+            },
+        },
+    )
+    client = TestClient(create_chat_ui_app(service=service, pool_manager=pool))
+
+    response = client.post("/api/ask-stream", json={"question": "hello"})
+
+    assert response.status_code == 503
+    assert response.json()["error_code"] == "WARMING_UP"
 
 
 def test_chat_ui_rate_limited_returns_429(tmp_path, monkeypatch):
