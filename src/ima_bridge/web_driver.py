@@ -3,13 +3,14 @@ from __future__ import annotations
 import time
 from typing import Callable
 
-from playwright.sync_api import Playwright
+from playwright.sync_api import BrowserContext, Page, Playwright
 
 from ima_bridge._web.answer_extractor import WebAnswerExtractor
 from ima_bridge._web.conversation import WebConversationRunner
 from ima_bridge._web.knowledge_base import WebKnowledgeBaseNavigator
 from ima_bridge._web.session import WebSession
 from ima_bridge.config import Settings
+from ima_bridge.driver_protocol import DriverAskResult, DriverModelCatalog
 from ima_bridge.errors import AskTimeoutError
 from ima_bridge.probes import GENERIC_TARGET_URL_PATHS
 from ima_bridge.target_state import TargetStateStore
@@ -82,36 +83,46 @@ class WebAskDriver:
         finally:
             context.close()
 
-    def ask(self, playwright: Playwright, question: str, headless: bool) -> tuple[str, str, list[str], str | None, str]:
-        return self._ask_impl(playwright=playwright, question=question, headless=headless, on_update=None)
+    def discover_model_catalog(self, playwright: Playwright, headless: bool) -> DriverModelCatalog:
+        context = self.session.launch_context(playwright, headless=headless)
+        try:
+            page = self._prepare_chat_page(context)
+            return self.conversation.discover_model_catalog(page, preferred_model=self.settings.model_prefix, strict=False)
+        finally:
+            context.close()
+
+    def ask(
+        self,
+        playwright: Playwright,
+        question: str,
+        headless: bool,
+        model: str | None = None,
+    ) -> DriverAskResult:
+        return self._ask_impl(playwright=playwright, question=question, headless=headless, model=model, on_update=None)
 
     def ask_stream(
         self,
         playwright: Playwright,
         question: str,
         headless: bool,
+        model: str | None,
         on_update: Callable[..., None],
-    ) -> tuple[str, str, list[str], str | None, str]:
-        return self._ask_impl(playwright=playwright, question=question, headless=headless, on_update=on_update)
+    ) -> DriverAskResult:
+        return self._ask_impl(playwright=playwright, question=question, headless=headless, model=model, on_update=on_update)
 
     def _ask_impl(
         self,
         playwright: Playwright,
         question: str,
         headless: bool,
+        model: str | None,
         on_update: Callable[..., None] | None,
-    ) -> tuple[str, str, list[str], str | None, str]:
+    ) -> DriverAskResult:
         context = self.session.launch_context(playwright, headless=headless)
         try:
-            page = self.session.acquire_page(context)
-            self.session.open_home(page)
-            self.kb_navigator.ensure_login(page)
-            if not self.kb_navigator.try_open_remembered_target(page):
-                self.kb_navigator.ensure_target_kb(page)
-            target_page = self.kb_navigator.find_target_page(context.pages)
-            if target_page is not None:
-                page = target_page
-            self.conversation.ensure_mode_model(page)
+            page = self._prepare_chat_page(context)
+            self.conversation.start_new_conversation(page)
+            selected_model = self.conversation.ensure_selected_model(page, requested_model=model)
 
             before_text = self.session.body_text(page)
             before_html = self.session.body_html(page)
@@ -135,6 +146,26 @@ class WebAskDriver:
 
             references = self.answer_extractor.extract_references(answer_text)
             screenshot = self.answer_extractor.capture(page) if self.settings.capture_screenshot else None
-            return answer_text, answer_html, references, screenshot, thinking_text
+            return DriverAskResult(
+                source_driver="web",
+                model=selected_model,
+                thinking_text=thinking_text,
+                answer_text=answer_text,
+                answer_html=answer_html,
+                references=references,
+                screenshot_path=screenshot,
+            )
         finally:
             context.close()
+
+    def _prepare_chat_page(self, context: BrowserContext) -> Page:
+        page = self.session.acquire_page(context)
+        self.session.open_home(page)
+        self.kb_navigator.ensure_login(page)
+        if not self.kb_navigator.try_open_remembered_target(page):
+            self.kb_navigator.ensure_target_kb(page)
+        target_page = self.kb_navigator.find_target_page(context.pages)
+        if target_page is not None:
+            page = target_page
+        self.conversation.ensure_mode_model(page)
+        return page

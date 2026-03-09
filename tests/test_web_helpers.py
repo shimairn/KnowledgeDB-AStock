@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from ima_bridge.driver_protocol import DriverModelOption
 from ima_bridge._web.answer_extractor import WebAnswerExtractor
-from ima_bridge._web.conversation import WebConversationRunner
+from ima_bridge._web.conversation import WebConversationRunner, match_model_option, normalize_model_text
 from ima_bridge._web.knowledge_base import WebKnowledgeBaseNavigator
 from ima_bridge._web.session import WebSession
 from ima_bridge.config import get_settings
@@ -42,6 +43,15 @@ def test_answer_extractor_helpers(tmp_path, monkeypatch):
     assert extractor.extract_references("正文\n[1] 引用一\n[2] 引用二") == ["[1] 引用一", "[2] 引用二"]
 
 
+def test_answer_extractor_prefers_richer_text_over_empty_kb_fallback(tmp_path, monkeypatch):
+    _, _, extractor = build_components(tmp_path, monkeypatch)
+
+    primary = "没有找到相关的知识库内容"
+    secondary = "没有找到相关的知识库内容\n但根据文档，华为算力概念股包括示例 A、示例 B。"
+
+    assert extractor._prefer_richer_answer_candidate(primary, secondary) == secondary
+
+
 
 def test_target_signals_allow_name_owner_without_full_title(tmp_path, monkeypatch):
     settings, navigator, _ = build_components(tmp_path, monkeypatch)
@@ -49,6 +59,52 @@ def test_target_signals_allow_name_owner_without_full_title(tmp_path, monkeypatc
 
     assert settings.kb_title not in body
     assert navigator.has_target_signals(body) is True
+
+
+def test_confirm_target_context_rejects_generic_hub_page(tmp_path, monkeypatch):
+    settings, navigator, _ = build_components(tmp_path, monkeypatch)
+    body = f"{settings.kb_title}\n{settings.kb_name}\n{settings.mode_name}\n问答历史"
+
+    class DummyContext:
+        def __init__(self):
+            self.pages = []
+
+    class DummyPage:
+        def __init__(self, url: str, context):
+            self.url = url
+            self.context = context
+
+    context = DummyContext()
+    page = DummyPage("https://ima.qq.com/wikis", context)
+    context.pages = [page]
+
+    navigator.session = type("Session", (), {"body_text": lambda self, current: body})()
+
+    assert navigator.has_target_signals(body) is True
+    assert navigator.confirm_target_context(page) is False
+
+
+def test_confirm_target_context_accepts_expanded_generic_kb_page(tmp_path, monkeypatch):
+    settings, navigator, _ = build_components(tmp_path, monkeypatch)
+    body = f"{settings.kb_title}\n{settings.kb_owner}\n{CONTENT_PREFIX}22557)\n{INPUT_HINT}问题"
+
+    class DummyContext:
+        def __init__(self):
+            self.pages = []
+
+    class DummyPage:
+        def __init__(self, url: str, context):
+            self.url = url
+            self.context = context
+
+    context = DummyContext()
+    page = DummyPage("https://ima.qq.com/wikis", context)
+    context.pages = [page]
+
+    navigator.session = type("Session", (), {"body_text": lambda self, current: body})()
+    navigator.remember_target_url = lambda page, body_text=None: None
+
+    assert navigator.confirm_target_context(page) is True
 
 
 def test_login_required_detection_matches_login_cta(tmp_path, monkeypatch):
@@ -87,3 +143,14 @@ def test_conversation_runner_allows_composer_without_mode_label(tmp_path, monkey
     runner.find_composer = lambda page: object()
 
     runner.ensure_mode_model(page)
+
+
+def test_model_match_handles_compact_and_full_labels():
+    options = [
+        DriverModelOption(value="DeepSeek V3.2 Think", label="DeepSeek V3.2 Think"),
+        DriverModelOption(value="DeepSeek V3.2", label="DeepSeek V3.2"),
+    ]
+
+    assert normalize_model_text("DS V3.2 T") == normalize_model_text("DeepSeek V3.2 Think")
+    assert match_model_option("DS V3.2 T", options) == options[0]
+    assert match_model_option("DS V3.2", options) == options[1]

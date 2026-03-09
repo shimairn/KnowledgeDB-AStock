@@ -3,25 +3,32 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>ima 匿名问答</title>
+  <title>匿名问答</title>
   <link rel="stylesheet" href="/assets/app.css" />
 </head>
 <body>
   <div class="app-shell">
     <header class="app-header">
       <div class="app-header-inner">
-        <div class="header-copy">
-          <p class="eyebrow">ima-bridge</p>
-          <h1>匿名公网问答</h1>
-          <p class="subtitle">仅保留当前页临时对话；刷新或新开窗口都会重新开始。</p>
+        <div class="status-badge" role="status" aria-live="polite" aria-atomic="true">
+          <span id="statusDot" class="dot"></span>
+          <span id="statusText">初始化中...</span>
         </div>
 
-        <div class="header-actions">
-          <div class="status-badge" role="status" aria-live="polite" aria-atomic="true">
-            <span id="statusDot" class="dot"></span>
-            <span id="statusText">初始化中...</span>
+        <div class="header-right">
+          <div id="modelField" class="model-field" hidden>
+            <label class="sr-only" for="modelSelect">模型</label>
+            <div class="model-select-wrap">
+              <select id="modelSelect" class="model-select"></select>
+            </div>
           </div>
-          <button id="clearBtn" type="button">清空对话</button>
+
+          <label class="toggle-chip" for="thinkingToggle">
+            <input id="thinkingToggle" type="checkbox" checked />
+            <span>显示思考</span>
+          </label>
+
+          <button id="clearBtn" type="button">新建对话</button>
         </div>
       </div>
     </header>
@@ -34,11 +41,17 @@
 
     <form id="composer" class="composer">
       <div class="composer-card">
-        <label class="composer-title" for="question">请输入问题</label>
-        <textarea id="question" rows="4" placeholder="Enter 发送，Shift+Enter 换行" aria-describedby="questionHint questionMeta"></textarea>
+        <label class="sr-only" for="question">输入问题</label>
+        <textarea
+          id="question"
+          rows="1"
+          placeholder="输入问题，Enter 发送，Shift+Enter 换行"
+          aria-describedby="questionHint questionMeta"
+        ></textarea>
+
         <div class="composer-footer">
           <div class="composer-meta">
-            <span id="questionHint" class="hint">支持连续提问；长时间无操作会自动清理当前页内容。</span>
+            <span id="questionHint" class="hint">每次提问都会自动开启新对话，页面空闲后会自动清理。</span>
             <span id="questionMeta" class="meta">0 字</span>
           </div>
           <button id="sendBtn" class="primary" type="submit">发送</button>
@@ -48,19 +61,34 @@
   </div>
 
   <div id="drawerBackdrop" class="drawer-backdrop" hidden></div>
-  <aside id="sourceDrawer" class="source-drawer" aria-hidden="true" aria-labelledby="sourceDrawerTitle" hidden>
+
+  <aside
+    id="sourceDrawer"
+    class="source-drawer"
+    aria-hidden="true"
+    aria-labelledby="sourceDrawerTitle"
+    hidden
+  >
     <div class="source-drawer-header">
       <div>
         <p class="drawer-kicker">Original Source</p>
         <h2 id="sourceDrawerTitle">原文预览</h2>
-        <p id="sourceDrawerMeta" class="drawer-meta">选择一条带链接的来源后，可在这里预览，并可跳转到原文。</p>
+        <p id="sourceDrawerMeta" class="drawer-meta">选择一条来源后，可在这里预览并跳转到原文。</p>
       </div>
       <button id="drawerCloseBtn" class="drawer-close" type="button" aria-label="关闭原文预览">关闭</button>
     </div>
 
     <div class="source-drawer-toolbar">
-      <a id="sourceDrawerOpenLink" class="source-link source-link--primary is-disabled" href="about:blank" target="_blank" rel="noreferrer" aria-disabled="true" tabindex="-1">打开原文</a>
-      <span id="sourceDrawerStatus" class="drawer-status">部分站点可能禁止嵌入预览；如未显示，请直接打开原文。</span>
+      <a
+        id="sourceDrawerOpenLink"
+        class="source-link source-link--primary is-disabled"
+        href="about:blank"
+        target="_blank"
+        rel="noreferrer"
+        aria-disabled="true"
+        tabindex="-1"
+      >打开原文</a>
+      <span id="sourceDrawerStatus" class="drawer-status">部分站点可能禁止嵌入预览；如果未显示，可直接打开原文。</span>
     </div>
 
     <div class="source-drawer-frame-wrap">

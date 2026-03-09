@@ -6,7 +6,7 @@ from playwright.sync_api import sync_playwright
 
 from ima_bridge.cdp_driver import CdpAskDriver
 from ima_bridge.config import Settings
-from ima_bridge.driver_protocol import AskDriver, DriverAskResult, DriverHealthStatus, DriverLoginStatus
+from ima_bridge.driver_protocol import AskDriver, DriverAskResult, DriverHealthStatus, DriverLoginStatus, DriverModelCatalog, DriverModelOption
 from ima_bridge.managed_app import ManagedIMAApp
 from ima_bridge.probes import APP_DRIVER_DEPRECATION_MESSAGE
 from ima_bridge.utils import get_logger
@@ -48,33 +48,31 @@ class WebServiceDriver(AskDriver):
             error_message=error_message,
         )
 
+    def get_model_catalog(self) -> DriverModelCatalog:
+        with sync_playwright() as playwright:
+            return self.web_driver.discover_model_catalog(playwright, headless=self.settings.web_headless)
+
     def ask(
         self,
         question: str,
+        model: str | None = None,
         on_update: Callable[..., None] | None = None,
     ) -> DriverAskResult:
         with sync_playwright() as playwright:
             if on_update is None:
-                answer_text, answer_html, references, screenshot, thinking_text = self.web_driver.ask(
+                return self.web_driver.ask(
                     playwright,
                     question,
                     headless=self.settings.web_headless,
+                    model=model,
                 )
-            else:
-                answer_text, answer_html, references, screenshot, thinking_text = self.web_driver.ask_stream(
-                    playwright,
-                    question,
-                    headless=self.settings.web_headless,
-                    on_update=on_update,
-                )
-        return DriverAskResult(
-            source_driver="web",
-            thinking_text=thinking_text,
-            answer_text=answer_text,
-            answer_html=answer_html,
-            references=references,
-            screenshot_path=screenshot,
-        )
+            return self.web_driver.ask_stream(
+                playwright,
+                question,
+                headless=self.settings.web_headless,
+                model=model,
+                on_update=on_update,
+            )
 
 
 class LegacyAppServiceDriver(AskDriver):
@@ -111,9 +109,15 @@ class LegacyAppServiceDriver(AskDriver):
     def login(self, timeout_seconds: float | None = None) -> DriverLoginStatus:
         return self.login_driver.login(timeout_seconds=timeout_seconds)
 
+    def get_model_catalog(self) -> DriverModelCatalog:
+        label = self.settings.model_prefix
+        options = [DriverModelOption(value=label, label=label, selected=bool(label))] if label else []
+        return DriverModelCatalog(current_model=label, options=options)
+
     def ask(
         self,
         question: str,
+        model: str | None = None,
         on_update: Callable[..., None] | None = None,
     ) -> DriverAskResult:
         endpoint = self.runtime.ensure_ready()
@@ -127,6 +131,7 @@ class LegacyAppServiceDriver(AskDriver):
             on_update("answer", answer_text, answer_text)
         return DriverAskResult(
             source_driver="app",
+            model=model or self.settings.model_prefix,
             thinking_text="",
             answer_text=answer_text,
             answer_html=answer_html,

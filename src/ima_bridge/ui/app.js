@@ -3,6 +3,9 @@ const questionEl = document.getElementById("question");
 const composer = document.getElementById("composer");
 const sendBtn = document.getElementById("sendBtn");
 const clearBtn = document.getElementById("clearBtn");
+const modelField = document.getElementById("modelField");
+const modelSelect = document.getElementById("modelSelect");
+const thinkingToggle = document.getElementById("thinkingToggle");
 const statusDot = document.getElementById("statusDot");
 const statusText = document.getElementById("statusText");
 const questionMeta = document.getElementById("questionMeta");
@@ -15,19 +18,122 @@ const sourceDrawerOpenLink = document.getElementById("sourceDrawerOpenLink");
 const sourceDrawerFrame = document.getElementById("sourceDrawerFrame");
 const drawerCloseBtn = document.getElementById("drawerCloseBtn");
 
-const INTRO_MESSAGE = "服务已连接，可直接提问。对话仅在当前页临时保留，长时间无操作会自动清理。";
+const INTRO_MESSAGE = "已连接，可直接提问。每次提问都会自动开启新对话，页面空闲后会自动清理。";
 const HTML_BASE_URL = "https://ima.qq.com/";
 const HTML_PARSER = new DOMParser();
-const AUTO_CLEAR_MS = 15 * 60 * 1000;
+const AUTO_CLEAR_MS = 10 * 60 * 1000;
+const QUESTION_MIN_HEIGHT = 44;
+const QUESTION_MAX_HEIGHT = 136;
+const CHAT_BOTTOM_THRESHOLD = 96;
+
+const NOISE_TEXT_PATTERNS = [
+  /^ima$/i,
+  /^找到了.*知识库资料$/,
+  /^已找到.*知识库资料$/,
+  /^(?:回答|答复|最终回答|final answer|answer)$/i,
+  /^(?:思考过程|思考中|推理过程|reasoning|thinking)$/i,
+  /^(?:展开|收起)$/,
+];
+const CITATION_ONLY_PATTERN = /^\s*(?:\[\d+\]|\d+)\s*$/;
+const BAD_CLASS_PATTERN = /(modeldesc|modelwrap|toolbar|header|knowledge|sourcecount|quoteindex|refindex|referenceindex|citation|actionbar|sender|avatar|footer)/i;
+const REMOVABLE_TAGS = new Set([
+  "script",
+  "style",
+  "link",
+  "meta",
+  "noscript",
+  "iframe",
+  "object",
+  "embed",
+  "form",
+  "input",
+  "button",
+  "textarea",
+  "select",
+  "option",
+  "audio",
+]);
+const ALLOWED_TAGS = new Set([
+  "a",
+  "b",
+  "blockquote",
+  "br",
+  "code",
+  "div",
+  "em",
+  "figcaption",
+  "figure",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+  "hr",
+  "i",
+  "img",
+  "li",
+  "ol",
+  "p",
+  "pre",
+  "s",
+  "section",
+  "span",
+  "strong",
+  "sub",
+  "sup",
+  "table",
+  "tbody",
+  "td",
+  "th",
+  "thead",
+  "tr",
+  "u",
+  "ul",
+]);
+const VOID_TAGS = new Set(["br", "hr", "img"]);
+const ATTRIBUTE_ALLOWLIST = {
+  a: new Set(["href", "title", "target", "rel"]),
+  img: new Set(["src", "alt", "title", "width", "height"]),
+  th: new Set(["colspan", "rowspan", "scope"]),
+  td: new Set(["colspan", "rowspan"]),
+  ol: new Set(["start"]),
+};
 
 let isBusy = false;
 let lastDrawerTrigger = null;
 let autoClearTimer = 0;
+let selectedModel = "";
+let modelOptions = [];
+let shouldAutoScroll = true;
+let showThinking = true;
 
-function scrollChatToBottom() {
+function normalizeWhitespace(value) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function isChatNearBottom() {
+  return chat.scrollHeight - chat.scrollTop - chat.clientHeight <= CHAT_BOTTOM_THRESHOLD;
+}
+
+function scrollChatToBottom(force = false) {
+  if (!force && !shouldAutoScroll) {
+    return;
+  }
   requestAnimationFrame(() => {
     chat.scrollTop = chat.scrollHeight;
+    if (force) {
+      shouldAutoScroll = true;
+    }
   });
+}
+
+function setThinkingVisibility(value) {
+  showThinking = Boolean(value);
+  document.body.classList.toggle("thinking-hidden", !showThinking);
+  if (thinkingToggle) {
+    thinkingToggle.checked = showThinking;
+  }
 }
 
 function historyMessageCount() {
@@ -44,30 +150,23 @@ function syncIntroState() {
 function syncComposerState() {
   questionMeta.textContent = `${questionEl.value.length} 字`;
   sendBtn.disabled = isBusy || !questionEl.value.trim();
-  clearBtn.disabled = isBusy || historyMessageCount() === 0;
+  clearBtn.disabled = isBusy || (!questionEl.value.trim() && historyMessageCount() === 0);
+  if (modelSelect) {
+    modelSelect.disabled = isBusy || modelOptions.length <= 1;
+  }
   syncIntroState();
+}
+
+function syncQuestionHeight() {
+  questionEl.style.height = "auto";
+  const nextHeight = Math.max(QUESTION_MIN_HEIGHT, Math.min(QUESTION_MAX_HEIGHT, questionEl.scrollHeight || 0));
+  questionEl.style.height = `${nextHeight}px`;
+  questionEl.style.overflowY = (questionEl.scrollHeight || 0) > QUESTION_MAX_HEIGHT ? "auto" : "hidden";
 }
 
 function setBusy(value) {
   isBusy = value;
   syncComposerState();
-}
-
-function setStatus(kind, text) {
-  statusDot.className = `dot ${kind}`;
-  statusText.textContent = text;
-}
-
-function clearConversation(options = {}) {
-  const { focus = true } = options;
-  closeSourceDrawer({ restoreFocus: false });
-  chat.innerHTML = "";
-  questionEl.value = "";
-  appendIntroMessage();
-  syncComposerState();
-  if (focus) {
-    questionEl.focus();
-  }
 }
 
 function scheduleAutoClear() {
@@ -90,27 +189,95 @@ function noteActivity() {
   scheduleAutoClear();
 }
 
+function setStatus(kind, text) {
+  statusDot.className = `dot ${kind}`;
+  statusText.textContent = text;
+}
+
 function setHealthStatus(payload) {
-  if (payload.ok) {
+  if (payload?.ok) {
     setStatus("ready", "可直接提问");
     return;
   }
-  if (payload.error_code === "BUSY") {
+  if (payload?.error_code === "BUSY") {
     setStatus("busy", "服务繁忙，请稍后重试");
     return;
   }
-  if (payload.error_code === "LOGIN_REQUIRED") {
-    setStatus("error", "请先完成登录");
+  if (payload?.error_code === "LOGIN_REQUIRED") {
+    setStatus("error", "需要先登录");
     return;
   }
-  if (payload.error_code === "KB_NOT_FOUND") {
-    setStatus("error", "未找到目标知识库");
+  if (payload?.error_code === "KB_NOT_FOUND") {
+    setStatus("error", "需要先确认知识库");
     return;
   }
   setStatus("error", "服务连接异常");
 }
 
-function setDrawerVisibility(visible) {
+function findModelOption(value) {
+  return modelOptions.find((option) => option.value === value || option.label === value) || null;
+}
+
+function applyModelCatalog(payload = {}) {
+  modelOptions = Array.isArray(payload.model_options)
+    ? payload.model_options
+        .map((option) => ({
+          value: String(option?.value || option?.label || "").trim(),
+          label: String(option?.label || option?.value || "").trim(),
+          description: String(option?.description || "").trim(),
+          selected: Boolean(option?.selected),
+        }))
+        .filter((option) => option.value && option.label)
+    : [];
+
+  if (!modelField || !modelSelect) {
+    return;
+  }
+
+  if (!modelOptions.length) {
+    selectedModel = "";
+    modelField.hidden = true;
+    modelSelect.innerHTML = "";
+    syncComposerState();
+    return;
+  }
+
+  modelField.hidden = false;
+  modelSelect.innerHTML = "";
+
+  modelOptions.forEach((option) => {
+    const item = document.createElement("option");
+    item.value = option.value;
+    item.textContent = option.label;
+    if (option.description) {
+      item.title = option.description;
+    }
+    modelSelect.appendChild(item);
+  });
+
+  const currentModel = String(payload.current_model || "").trim();
+  const currentOption = findModelOption(currentModel);
+  const selectedOption = currentOption || modelOptions.find((option) => option.selected) || modelOptions[0] || null;
+  selectedModel = selectedOption?.value || "";
+  if (selectedModel) {
+    modelSelect.value = selectedModel;
+  }
+  syncComposerState();
+}
+
+function clearConversation(options = {}) {
+  const { focus = true } = options;
+  closeSourceDrawer({ restoreFocus: false });
+  shouldAutoScroll = true;
+  chat.innerHTML = "";
+  questionEl.value = "";
+  syncQuestionHeight();
+  appendIntroMessage();
+  syncComposerState();
+  if (focus) {
+    questionEl.focus();
+  }
+}function setDrawerVisibility(visible) {
   sourceDrawer.setAttribute("aria-hidden", String(!visible));
   document.body.classList.toggle("drawer-open", visible);
 
@@ -134,6 +301,15 @@ function setDrawerVisibility(visible) {
   }, 240);
 }
 
+function formatSourceHost(href) {
+  try {
+    const url = new URL(href);
+    return `${url.hostname}${url.pathname}`;
+  } catch (_) {
+    return href;
+  }
+}
+
 function closeSourceDrawer(options = {}) {
   const { restoreFocus = true } = options;
   if (sourceDrawer.hidden && !sourceDrawer.classList.contains("is-open")) {
@@ -142,8 +318,8 @@ function closeSourceDrawer(options = {}) {
 
   setDrawerVisibility(false);
   sourceDrawerTitle.textContent = "原文预览";
-  sourceDrawerMeta.textContent = "选择一条带链接的来源后，可在这里预览，并可跳转到原文。";
-  sourceDrawerStatus.textContent = "部分站点可能禁止嵌入预览；如未显示，请直接打开原文。";
+  sourceDrawerMeta.textContent = "选择一条来源后，可在这里预览并跳转到原文。";
+  sourceDrawerStatus.textContent = "部分站点可能禁止嵌入预览；如果未显示，可直接打开原文。";
   sourceDrawerOpenLink.href = "about:blank";
   sourceDrawerOpenLink.classList.add("is-disabled");
   sourceDrawerOpenLink.setAttribute("aria-disabled", "true");
@@ -154,15 +330,6 @@ function closeSourceDrawer(options = {}) {
     lastDrawerTrigger.focus();
   }
   lastDrawerTrigger = null;
-}
-
-function formatSourceHost(href) {
-  try {
-    const url = new URL(href);
-    return `${url.hostname}${url.pathname}`;
-  } catch (_) {
-    return href;
-  }
 }
 
 function openSourceDrawer(source, trigger = null) {
@@ -179,7 +346,7 @@ function openSourceDrawer(source, trigger = null) {
 
   sourceDrawerTitle.textContent = source.title || "原文预览";
   sourceDrawerMeta.textContent = source.quote || formatSourceHost(source.href);
-  sourceDrawerStatus.textContent = "正在加载原文预览；如内容为空，可能是目标站点禁止嵌入。";
+  sourceDrawerStatus.textContent = "正在加载原文预览；如果内容为空，可能是目标站点禁止嵌入。";
   sourceDrawerOpenLink.href = source.href;
   sourceDrawerOpenLink.classList.remove("is-disabled");
   sourceDrawerOpenLink.removeAttribute("aria-disabled");
@@ -187,6 +354,155 @@ function openSourceDrawer(source, trigger = null) {
   sourceDrawerFrame.src = source.href;
   setDrawerVisibility(true);
   setTimeout(() => drawerCloseBtn.focus(), 0);
+}
+
+function escapeHtml(value) {
+  return String(value || "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function textToRichHtml(value) {
+  const source = String(value || "").replace(/\r\n?/g, "\n").trim();
+  if (!source) {
+    return "";
+  }
+
+  const lines = source.split("\n");
+  const parts = [];
+  let paragraph = [];
+  let codeFence = false;
+  let codeLines = [];
+
+  const flushParagraph = () => {
+    if (!paragraph.length) {
+      return;
+    }
+    parts.push(`<p>${paragraph.map((line) => escapeHtml(line)).join("<br />")}</p>`);
+    paragraph = [];
+  };
+
+  const flushCode = () => {
+    if (!codeLines.length) {
+      return;
+    }
+    parts.push(`<pre><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
+    codeLines = [];
+  };
+
+  for (const rawLine of lines) {
+    const line = rawLine || "";
+    if (line.trim().startsWith("```")) {
+      flushParagraph();
+      if (codeFence) {
+        flushCode();
+      }
+      codeFence = !codeFence;
+      continue;
+    }
+
+    if (codeFence) {
+      codeLines.push(line);
+      continue;
+    }
+
+    if (!line.trim()) {
+      flushParagraph();
+      continue;
+    }
+
+    paragraph.push(line);
+  }
+
+  flushParagraph();
+  flushCode();
+  return parts.join("");
+}
+
+function decorateRichAnchors(root) {
+  root.querySelectorAll("a[href]").forEach((anchor) => {
+    anchor.target = "_blank";
+    anchor.rel = "noreferrer";
+  });
+}
+
+function setRichContent(node, html) {
+  node.innerHTML = html;
+  decorateRichAnchors(node);
+}
+
+function renderTextRichContent(node, text, extraClass = "") {
+  node.className = `bubble-text rich-content rich-content--text${extraClass ? ` ${extraClass}` : ""}`;
+  setRichContent(node, textToRichHtml(text));
+}
+
+function commonPrefixLength(left, right) {
+  const max = Math.min(left.length, right.length);
+  let index = 0;
+  while (index < max && left[index] === right[index]) {
+    index += 1;
+  }
+  return index;
+}
+
+function createTypewriter(render) {
+  let targetText = "";
+  let renderedText = "";
+  let frame = 0;
+
+  function flush() {
+    render(renderedText);
+    scrollChatToBottom();
+  }
+
+  function step() {
+    frame = 0;
+    if (renderedText === targetText) {
+      return;
+    }
+
+    const remaining = targetText.length - renderedText.length;
+    const batch = remaining > 80 ? 3 : remaining > 20 ? 2 : 1;
+    renderedText = targetText.slice(0, renderedText.length + batch);
+    flush();
+
+    if (renderedText !== targetText) {
+      frame = requestAnimationFrame(step);
+    }
+  }
+
+  return {
+    queue(value) {
+      const nextText = String(value || "");
+      if (!nextText.startsWith(renderedText)) {
+        const prefixLength = commonPrefixLength(nextText, renderedText);
+        renderedText = nextText.slice(0, prefixLength);
+        flush();
+      }
+      targetText = nextText;
+      if (!frame) {
+        frame = requestAnimationFrame(step);
+      }
+    },
+    set(value) {
+      if (frame) {
+        cancelAnimationFrame(frame);
+        frame = 0;
+      }
+      targetText = String(value || "");
+      renderedText = targetText;
+      flush();
+    },
+    stop() {
+      if (frame) {
+        cancelAnimationFrame(frame);
+        frame = 0;
+      }
+    },
+  };
 }
 
 function createMessageRow(role, extraClass = "") {
@@ -204,7 +520,7 @@ function createMessageRow(role, extraClass = "") {
   row.appendChild(bubble);
   chat.appendChild(row);
   syncComposerState();
-  scrollChatToBottom();
+  scrollChatToBottom(true);
 
   return { row, bubble };
 }
@@ -218,11 +534,113 @@ function appendUserMessage(text) {
   return bubble;
 }
 
-function createChip(text) {
-  const chip = document.createElement("span");
-  chip.className = "meta-chip";
-  chip.textContent = text;
-  return chip;
+function createDetailHeader(title, subtitle) {
+  const header = document.createElement("div");
+  header.className = "detail-header";
+
+  const copy = document.createElement("div");
+  const titleEl = document.createElement("h3");
+  titleEl.className = "detail-title";
+  titleEl.textContent = title;
+  copy.appendChild(titleEl);
+
+  if (subtitle) {
+    const subtitleEl = document.createElement("p");
+    subtitleEl.className = "detail-subtitle";
+    subtitleEl.textContent = subtitle;
+    copy.appendChild(subtitleEl);
+  }
+
+  header.appendChild(copy);
+  return header;
+}
+
+function createSourceSection(items, references) {
+  if (!items.length && !references.length) {
+    return null;
+  }
+
+  const section = document.createElement("section");
+  section.className = "detail-card";
+  section.appendChild(createDetailHeader("引用原文", "在这里查看引用来源，也可以侧边预览或打开原文。"));
+
+  if (items.length) {
+    const grid = document.createElement("div");
+    grid.className = "source-grid";
+
+    items.forEach((item, index) => {
+      const card = document.createElement("article");
+      card.className = "source-card";
+
+      const head = document.createElement("div");
+      head.className = "source-card-head";
+      const indexEl = document.createElement("span");
+      indexEl.className = "source-index";
+      indexEl.textContent = `来源 ${index + 1}`;
+      head.appendChild(indexEl);
+      card.appendChild(head);
+
+      const title = document.createElement("p");
+      title.className = "source-title";
+      title.textContent = item.title;
+      card.appendChild(title);
+
+      if (item.quote) {
+        const quote = document.createElement("blockquote");
+        quote.className = "source-quote";
+        quote.textContent = item.quote;
+        card.appendChild(quote);
+      }
+
+      const footer = document.createElement("div");
+      footer.className = "source-footer";
+
+      const url = document.createElement("span");
+      url.className = "source-url";
+      url.textContent = item.href ? formatSourceHost(item.href) : "仅保留引用文本";
+      footer.appendChild(url);
+
+      if (item.href) {
+        const actions = document.createElement("div");
+        actions.className = "source-actions";
+
+        const previewButton = document.createElement("button");
+        previewButton.type = "button";
+        previewButton.className = "source-link";
+        previewButton.textContent = "侧边预览";
+        previewButton.addEventListener("click", () => openSourceDrawer(item, previewButton));
+        actions.appendChild(previewButton);
+
+        const link = document.createElement("a");
+        link.className = "source-link source-link--primary";
+        link.href = item.href;
+        link.target = "_blank";
+        link.rel = "noreferrer";
+        link.textContent = "打开原文";
+        actions.appendChild(link);
+
+        footer.appendChild(actions);
+      }
+
+      card.appendChild(footer);
+      grid.appendChild(card);
+    });
+
+    section.appendChild(grid);
+  }
+
+  if (references.length) {
+    const list = document.createElement("ol");
+    list.className = "reference-list";
+    references.forEach((reference) => {
+      const item = document.createElement("li");
+      item.textContent = stripReferenceMarker(reference) || reference;
+      list.appendChild(item);
+    });
+    section.appendChild(list);
+  }
+
+  return section;
 }
 
 function createAssistantView({ intro = false } = {}) {
@@ -231,7 +649,7 @@ function createAssistantView({ intro = false } = {}) {
   main.className = "bubble-main";
 
   const body = document.createElement("div");
-  body.className = "bubble-text";
+  body.className = "bubble-text rich-content rich-content--text";
   main.appendChild(body);
 
   const extras = document.createElement("div");
@@ -240,65 +658,50 @@ function createAssistantView({ intro = false } = {}) {
   bubble.appendChild(main);
   bubble.appendChild(extras);
 
-  let mainText = "";
   let thinkingText = "";
-  let mainFrame = 0;
-  let thinkingFrame = 0;
-  let metaRow = null;
   let thinkingDetails = null;
-  let thinkingPre = null;
+  let thinkingContent = null;
   let thinkingState = null;
-  let detailStack = null;
-
-  function queueMainText(value) {
-    mainText = String(value || "");
-    if (mainFrame) {
-      return;
-    }
-    mainFrame = requestAnimationFrame(() => {
-      mainFrame = 0;
-      body.textContent = mainText;
-      scrollChatToBottom();
-    });
-  }
+  let thinkingCaption = null;
+  let thinkingWriter = null;
+  let sourceSection = null;
+  const mainWriter = createTypewriter((value) => renderTextRichContent(body, value));
 
   function setMainText(value) {
-    mainText = String(value || "");
-    body.textContent = mainText;
+    body.className = "bubble-text rich-content rich-content--text";
+    mainWriter.set(String(value || ""));
   }
 
-  function removeMeta() {
-    if (metaRow) {
-      metaRow.remove();
-      metaRow = null;
-    }
+  function queueMainText(value) {
+    body.className = "bubble-text rich-content rich-content--text";
+    mainWriter.queue(String(value || ""));
   }
 
-  function setMeta(texts) {
-    const labels = Array.isArray(texts) ? texts.filter(Boolean) : [];
-    if (!labels.length) {
-      removeMeta();
+  function setMainHtml(value) {
+    const normalized = String(value || "").trim();
+    if (!normalized) {
+      setMainText("");
       return;
     }
-
-    if (!metaRow) {
-      metaRow = document.createElement("div");
-      metaRow.className = "bubble-meta";
-      extras.appendChild(metaRow);
-    }
-
-    metaRow.innerHTML = "";
-    labels.forEach((label) => metaRow.appendChild(createChip(label)));
+    mainWriter.stop();
+    body.className = "bubble-text rich-content rich-content--answer";
+    setRichContent(body, normalized);
+    scrollChatToBottom();
   }
 
   function removeThinking() {
+    if (thinkingWriter) {
+      thinkingWriter.stop();
+      thinkingWriter = null;
+    }
     if (thinkingDetails) {
       thinkingDetails.remove();
       thinkingDetails = null;
-      thinkingPre = null;
+      thinkingContent = null;
       thinkingState = null;
-      thinkingText = "";
+      thinkingCaption = null;
     }
+    thinkingText = "";
   }
 
   function ensureThinking() {
@@ -317,29 +720,39 @@ function createAssistantView({ intro = false } = {}) {
     title.className = "thinking-title";
     title.textContent = "思考过程";
 
-    const caption = document.createElement("span");
-    caption.className = "thinking-caption";
-    caption.textContent = "默认折叠展示，避免打断阅读。";
+    thinkingCaption = document.createElement("span");
+    thinkingCaption.className = "thinking-caption";
+    thinkingCaption.textContent = "默认折叠，可随时展开查看。";
 
     thinkingState = document.createElement("span");
     thinkingState.className = "thinking-state";
-    thinkingState.textContent = "思考中…";
+    thinkingState.textContent = "思考中...";
 
     copy.appendChild(title);
-    copy.appendChild(caption);
+    copy.appendChild(thinkingCaption);
     summary.appendChild(copy);
     summary.appendChild(thinkingState);
 
     const thinkingBody = document.createElement("div");
     thinkingBody.className = "thinking-body";
-    thinkingPre = document.createElement("pre");
-    thinkingPre.className = "thinking-pre";
-    thinkingBody.appendChild(thinkingPre);
+
+    thinkingContent = document.createElement("div");
+    thinkingContent.className = "rich-content rich-content--thinking";
+    thinkingBody.appendChild(thinkingContent);
 
     thinkingDetails.appendChild(summary);
     thinkingDetails.appendChild(thinkingBody);
-    thinkingDetails.addEventListener("toggle", scrollChatToBottom);
+    thinkingDetails.addEventListener("toggle", () => {
+      noteActivity();
+      scrollChatToBottom();
+    });
     extras.appendChild(thinkingDetails);
+
+    thinkingWriter = createTypewriter((value) => {
+      if (thinkingContent) {
+        setRichContent(thinkingContent, textToRichHtml(value));
+      }
+    });
   }
 
   function queueThinkingText(value, options = {}) {
@@ -355,19 +768,9 @@ function createAssistantView({ intro = false } = {}) {
     ensureThinking();
     thinkingText = normalized;
     thinkingDetails.classList.toggle("is-live", Boolean(streaming));
-    thinkingState.textContent = streaming ? "思考中…" : "已完成";
-
-    if (thinkingFrame) {
-      return;
-    }
-
-    thinkingFrame = requestAnimationFrame(() => {
-      thinkingFrame = 0;
-      if (thinkingPre) {
-        thinkingPre.textContent = thinkingText;
-      }
-      scrollChatToBottom();
-    });
+    thinkingState.textContent = streaming ? "思考中..." : "已完成";
+    thinkingCaption.textContent = streaming ? "生成中，可随时展开查看。" : "默认折叠，可随时展开查看。";
+    thinkingWriter.queue(thinkingText);
   }
 
   function finalizeThinking(value) {
@@ -376,30 +779,34 @@ function createAssistantView({ intro = false } = {}) {
       removeThinking();
       return;
     }
-    queueThinkingText(normalized, { streaming: false });
+    ensureThinking();
+    thinkingText = normalized;
+    thinkingDetails.classList.remove("is-live");
+    thinkingState.textContent = "已完成";
+    thinkingCaption.textContent = "默认折叠，可随时展开查看。";
+    thinkingWriter.set(thinkingText);
   }
 
-  function setDetails(node) {
-    if (detailStack) {
-      detailStack.remove();
-      detailStack = null;
+  function setSources(items, references = []) {
+    if (sourceSection) {
+      sourceSection.remove();
+      sourceSection = null;
     }
-    if (node && node.childElementCount > 0) {
-      detailStack = node;
-      extras.appendChild(detailStack);
+    const next = createSourceSection(items, references);
+    if (next) {
+      sourceSection = next;
+      extras.appendChild(sourceSection);
     }
   }
 
   return {
     row,
-    bubble,
     queueMainText,
     setMainText,
-    setMeta,
+    setMainHtml,
     queueThinkingText,
     finalizeThinking,
-    setDetails,
-    getThinkingText: () => thinkingText,
+    setSources,
   };
 }
 
@@ -415,14 +822,13 @@ function formatApiError(payload) {
     return "请先完成登录后再使用问答服务";
   }
   if (code === "KB_NOT_FOUND") {
-    return "未找到目标知识库，请确认已进入正确知识库";
+    return "请先登录并进入目标知识库后再提问";
+  }
+  if (code === "BUSY") {
+    return "服务繁忙，请稍后重试";
   }
   const message = payload?.error_message || "请求失败";
   return `${code}: ${message}`;
-}
-
-function normalizeWhitespace(value) {
-  return String(value || "").replace(/\s+/g, " ").trim();
 }
 
 function stripReferenceMarker(value) {
@@ -482,8 +888,164 @@ function resolveHtmlUrl(href) {
   }
 }
 
+function isNoiseText(text) {
+  const normalized = normalizeWhitespace(text);
+  return Boolean(normalized) && NOISE_TEXT_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
+function removeStructuralNoise(root, options = {}) {
+  const { removeCitationOnly = true } = options;
+  const removableSelector = Array.from(REMOVABLE_TAGS).join(",");
+  if (removableSelector) {
+    root.querySelectorAll(removableSelector).forEach((node) => node.remove());
+  }
+  root.querySelectorAll("[x-noteelement='excluded'], [data-noteelement='excluded']").forEach((node) => node.remove());
+
+  const elements = Array.from(root.querySelectorAll("*")).reverse();
+  elements.forEach((element) => {
+    if (!element.isConnected) {
+      return;
+    }
+    const tag = element.tagName.toLowerCase();
+    const text = normalizeWhitespace(element.textContent);
+    const className = String(element.getAttribute("class") || "");
+    const attrText = normalizeWhitespace(`${className} ${element.id || ""} ${element.getAttribute("data-testid") || ""} ${element.getAttribute("data-role") || ""} ${element.getAttribute("aria-label") || ""}`);
+
+    if (
+      removeCitationOnly &&
+      text &&
+      CITATION_ONLY_PATTERN.test(text) &&
+      ["sup", "a", "span", "button", "i", "em", "strong"].includes(tag)
+    ) {
+      element.remove();
+      return;
+    }
+
+    if (
+      text &&
+      text.length <= 72 &&
+      isNoiseText(text) &&
+      !element.querySelector("table,blockquote,pre,img,code")
+    ) {
+      element.remove();
+      return;
+    }
+
+    if (
+      attrText &&
+      BAD_CLASS_PATTERN.test(attrText) &&
+      text.length <= 80 &&
+      !element.querySelector("table,blockquote,pre,img,code")
+    ) {
+      element.remove();
+    }
+  });
+}
+
+function sanitizeElementAttributes(element) {
+  const tag = element.tagName.toLowerCase();
+  const allowed = ATTRIBUTE_ALLOWLIST[tag] || new Set();
+
+  Array.from(element.attributes).forEach((attr) => {
+    const name = attr.name.toLowerCase();
+    if (
+      name.startsWith("on") ||
+      name.startsWith("data-") ||
+      name.startsWith("aria-") ||
+      name === "class" ||
+      name === "style" ||
+      name === "id" ||
+      name === "role" ||
+      name === "tabindex" ||
+      name === "contenteditable" ||
+      !allowed.has(name)
+    ) {
+      element.removeAttribute(attr.name);
+    }
+  });
+
+  if (tag === "a") {
+    const href = resolveHtmlUrl(element.getAttribute("href") || "");
+    if (!/^https?:\/\//i.test(href)) {
+      element.replaceWith(...Array.from(element.childNodes));
+      return false;
+    }
+    element.setAttribute("href", href);
+    element.setAttribute("target", "_blank");
+    element.setAttribute("rel", "noreferrer");
+    return true;
+  }
+
+  if (tag === "img") {
+    const src = resolveHtmlUrl(element.getAttribute("src") || "");
+    if (!/^https?:\/\//i.test(src)) {
+      element.remove();
+      return false;
+    }
+    element.setAttribute("src", src);
+    if (!element.getAttribute("alt")) {
+      element.setAttribute("alt", "");
+    }
+    return true;
+  }
+
+  return true;
+}
+
+function stripEmptyNodes(root) {
+  const elements = Array.from(root.querySelectorAll("*")).reverse();
+  elements.forEach((element) => {
+    if (!element.isConnected) {
+      return;
+    }
+    const tag = element.tagName.toLowerCase();
+    if (VOID_TAGS.has(tag) || ["table", "thead", "tbody", "tr", "td", "th"].includes(tag)) {
+      return;
+    }
+    if (element.querySelector("img,br,table,pre,blockquote,ul,ol")) {
+      return;
+    }
+    if (!normalizeWhitespace(element.textContent)) {
+      element.remove();
+    }
+  });
+}
+
+function sanitizeHtmlTree(root, options = {}) {
+  removeStructuralNoise(root, options);
+
+  const elements = Array.from(root.querySelectorAll("*")).reverse();
+  elements.forEach((element) => {
+    if (!element.isConnected) {
+      return;
+    }
+
+    const tag = element.tagName.toLowerCase();
+    if (REMOVABLE_TAGS.has(tag)) {
+      element.remove();
+      return;
+    }
+
+    if (!ALLOWED_TAGS.has(tag)) {
+      element.replaceWith(...Array.from(element.childNodes));
+      return;
+    }
+
+    sanitizeElementAttributes(element);
+  });
+
+  stripEmptyNodes(root);
+}
+
+function sanitizeAnswerHtml(answerHtml) {
+  const doc = toHtmlDocument(answerHtml);
+  sanitizeHtmlTree(doc.body, { removeCitationOnly: true });
+  return doc.body.innerHTML.trim();
+}
+
 function extractHtmlArtifacts(answerHtml) {
   const doc = toHtmlDocument(answerHtml);
+  sanitizeHtmlTree(doc.body, { removeCitationOnly: false });
 
   const links = dedupeBy(
     Array.from(doc.querySelectorAll("a[href]"))
@@ -491,7 +1053,7 @@ function extractHtmlArtifacts(answerHtml) {
         href: resolveHtmlUrl(anchor.getAttribute("href") || anchor.href || ""),
         label: normalizeWhitespace(anchor.textContent) || `原文 ${index + 1}`,
       }))
-      .filter((item) => item.href),
+      .filter((item) => /^https?:\/\//i.test(item.href)),
     (item) => item.href,
   );
 
@@ -508,285 +1070,98 @@ function extractHtmlArtifacts(answerHtml) {
     })
     .filter((item) => item.text || item.href);
 
-  return {
-    links,
-    quotes,
-    tableCount: doc.querySelectorAll("table").length,
-  };
+  return { links, quotes };
 }
 
-function createDetailHeader(title, subtitle) {
-  const header = document.createElement("div");
-  header.className = "detail-header";
-
-  const copy = document.createElement("div");
-  const titleEl = document.createElement("h3");
-  titleEl.className = "detail-title";
-  titleEl.textContent = title;
-  copy.appendChild(titleEl);
-
-  if (subtitle) {
-    const subtitleEl = document.createElement("p");
-    subtitleEl.className = "detail-subtitle";
-    subtitleEl.textContent = subtitle;
-    copy.appendChild(subtitleEl);
+function normalizeSourceTitle(label, href, index) {
+  const cleaned = stripReferenceMarker(label);
+  if (cleaned && !CITATION_ONLY_PATTERN.test(cleaned) && cleaned.length > 1) {
+    return cleaned;
   }
-
-  header.appendChild(copy);
-  return header;
+  if (href) {
+    return formatSourceHost(href);
+  }
+  return `来源 ${index}`;
 }
 
 function buildSourceItems(references, artifacts) {
   const items = [];
 
+  const pushItem = (item) => {
+    const normalizedItem = {
+      title: String(item?.title || "").trim(),
+      quote: String(item?.quote || "").trim(),
+      href: String(item?.href || "").trim(),
+    };
+    if (!normalizedItem.title && !normalizedItem.quote && !normalizedItem.href) {
+      return;
+    }
+    items.push(normalizedItem);
+  };
+
   artifacts.quotes.forEach((quote, index) => {
-    items.push({
-      title: stripReferenceMarker(quote.label) || `来源 ${index + 1}`,
+    pushItem({
+      title: normalizeSourceTitle(quote.label, quote.href, index + 1),
       quote: quote.text,
       href: quote.href,
     });
   });
 
   artifacts.links.forEach((link, index) => {
-    if (items.some((item) => item.href && item.href === link.href)) {
-      return;
-    }
-    items.push({
-      title: stripReferenceMarker(link.label) || `原文 ${index + 1}`,
+    pushItem({
+      title: normalizeSourceTitle(link.label, link.href, index + 1),
       quote: "",
       href: link.href,
     });
   });
 
-  return items;
-}
-
-function appendSourceSection(container, references, artifacts) {
-  const items = buildSourceItems(references, artifacts);
-  if (!items.length && !references.length) {
-    return;
-  }
-
-  const section = document.createElement("section");
-  section.className = "detail-card";
-  section.appendChild(createDetailHeader("引用原文", "来源入口和引用片段会统一收在这里，便于校对。"));
-
-  if (items.length) {
-    const grid = document.createElement("div");
-    grid.className = "source-grid";
-
-    items.forEach((item, index) => {
-      const card = document.createElement("article");
-      card.className = "source-card";
-
-      const head = document.createElement("div");
-      head.className = "source-card-head";
-      const indexEl = document.createElement("span");
-      indexEl.className = "source-index";
-      indexEl.textContent = `来源 ${index + 1}`;
-      head.appendChild(indexEl);
-      card.appendChild(head);
-
-      const title = document.createElement("p");
-      title.className = "source-title";
-      title.textContent = item.title;
-      card.appendChild(title);
-
-      if (item.quote) {
-        const quote = document.createElement("blockquote");
-        quote.className = "source-quote";
-        quote.textContent = item.quote;
-        card.appendChild(quote);
-      }
-
-      const footer = document.createElement("div");
-      footer.className = "source-footer";
-      if (item.href) {
-        const url = document.createElement("span");
-        url.className = "source-url";
-        url.textContent = formatSourceHost(item.href);
-        footer.appendChild(url);
-
-        const actions = document.createElement("div");
-        actions.className = "source-actions";
-
-        const previewButton = document.createElement("button");
-        previewButton.type = "button";
-        previewButton.className = "source-link";
-        previewButton.textContent = "侧边预览";
-        previewButton.addEventListener("click", () => openSourceDrawer(item, previewButton));
-        actions.appendChild(previewButton);
-
-        const link = document.createElement("a");
-        link.className = "source-link source-link--primary";
-        link.href = item.href;
-        link.target = "_blank";
-        link.rel = "noreferrer";
-        link.textContent = "打开原文";
-        actions.appendChild(link);
-
-        footer.appendChild(actions);
-      } else {
-        const note = document.createElement("span");
-        note.className = "source-url";
-        note.textContent = "当前仅抽取到引用条目，未发现可直接打开的链接。";
-        footer.appendChild(note);
-      }
-
-      card.appendChild(footer);
-      grid.appendChild(card);
+  references.forEach((reference, index) => {
+    pushItem({
+      title: stripReferenceMarker(reference) || `来源 ${index + 1}`,
+      quote: "",
+      href: "",
     });
-
-    section.appendChild(grid);
-  }
-
-  if (references.length) {
-    const list = document.createElement("ol");
-    list.className = "reference-list";
-    references.forEach((reference) => {
-      const item = document.createElement("li");
-      item.textContent = stripReferenceMarker(reference) || reference;
-      list.appendChild(item);
-    });
-    section.appendChild(list);
-  }
-
-  container.appendChild(section);
-}
-
-function wrapAnswerHtml(answerHtml) {
-  const html = String(answerHtml || "").trim();
-  if (!html) {
-    return "<!doctype html><html><head><meta charset=\"utf-8\" /></head><body></body></html>";
-  }
-  if (/<html[\s>]/i.test(html)) {
-    return html;
-  }
-
-  return `<!doctype html><html><head><meta charset="utf-8" />
-  <base href="${HTML_BASE_URL}" />
-  <style>
-    :root { color-scheme: light; --line:#dbe4f4; --line-strong:#cad7f0; --text:#172033; --muted:#60708d; --primary:#315efb; --panel:#f8fbff; --quote:#f5f8ff; --shadow:0 10px 24px rgba(15, 23, 42, 0.08); --radius:14px; }
-    html,body { margin:0; padding:0; background:#fff; color:var(--text); }
-    body { padding:14px; font:14px/1.75 "Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; }
-    h1,h2,h3,h4 { margin:0 0 12px; line-height:1.3; color:#1b2c57; }
-    p,ul,ol { margin:0 0 12px; }
-    table { width:100%; border-collapse:separate; border-spacing:0; overflow:hidden; border:1px solid var(--line-strong); border-radius:var(--radius); background:#fff; box-shadow:var(--shadow); margin:14px 0; }
-    thead th { background:linear-gradient(180deg,#eef4ff,#e7efff); color:#274277; font-weight:700; border-bottom:1px solid var(--line-strong); }
-    th,td { padding:10px 12px; text-align:left; vertical-align:top; }
-    tbody tr:nth-child(even) { background:#f8fbff; }
-    tbody td { border-top:1px solid var(--line); }
-    blockquote { margin:16px 0; padding:14px 16px; border-left:4px solid var(--primary); border-radius:var(--radius); background:var(--quote); color:#28416f; }
-    img,svg,canvas,video { max-width:100%; height:auto; }
-    pre { white-space:pre-wrap; word-break:break-word; padding:12px; border-radius:12px; background:var(--panel); border:1px solid var(--line); overflow:auto; }
-    a { color:var(--primary); text-decoration:underline; text-decoration-thickness:1.5px; text-underline-offset:3px; word-break:break-all; }
-  </style></head><body>${html}</body></html>`;
-}
-
-function appendRichSection(container, answerHtml, artifacts) {
-  const html = String(answerHtml || "").trim();
-  if (!html) {
-    return;
-  }
-
-  const details = document.createElement("details");
-  details.className = "rich-details";
-
-  const summary = document.createElement("summary");
-  const copy = document.createElement("div");
-  copy.className = "thinking-copy";
-
-  const title = document.createElement("span");
-  title.className = "thinking-title";
-  title.textContent = "富文本内容";
-
-  const subtitle = document.createElement("span");
-  subtitle.className = "thinking-caption";
-  subtitle.textContent = artifacts.tableCount
-    ? `检测到 ${artifacts.tableCount} 个表格，保留结构化排版。`
-    : "原始富文本会在这里保留，便于核对格式。";
-
-  const state = document.createElement("span");
-  state.className = "thinking-state";
-  state.textContent = "展开";
-
-  copy.appendChild(title);
-  copy.appendChild(subtitle);
-  summary.appendChild(copy);
-  summary.appendChild(state);
-
-  const body = document.createElement("div");
-  body.className = "rich-details-body";
-  const wrap = document.createElement("div");
-  wrap.className = "html-wrap";
-  const frame = document.createElement("iframe");
-  frame.loading = "lazy";
-  frame.referrerPolicy = "no-referrer";
-  frame.srcdoc = wrapAnswerHtml(answerHtml);
-
-  const resize = () => {
-    try {
-      const doc = frame.contentDocument;
-      if (!doc) {
-        return;
-      }
-      const bodyHeight = doc.body.scrollHeight || 0;
-      const rootHeight = doc.documentElement ? doc.documentElement.scrollHeight || 0 : 0;
-      frame.style.height = `${Math.max(220, Math.min(3600, Math.max(bodyHeight, rootHeight) + 18))}px`;
-      scrollChatToBottom();
-    } catch (_) {
-    }
-  };
-
-  frame.addEventListener("load", () => {
-    resize();
-    setTimeout(resize, 120);
-    setTimeout(resize, 400);
-    setTimeout(resize, 1200);
   });
 
-  details.addEventListener("toggle", () => {
-    state.textContent = details.open ? "收起" : "展开";
-    scrollChatToBottom();
-  });
-
-  wrap.appendChild(frame);
-  body.appendChild(wrap);
-  details.appendChild(summary);
-  details.appendChild(body);
-  container.appendChild(details);
+  return dedupeBy(items, (item) => item.href || `${item.title}::${item.quote}`);
 }
 
 function renderAssistantResponse(view, payload, fallbackAnswerText, fallbackThinkingText) {
   const references = collectReferenceLines(payload);
-  const summaryText = stripReferenceLines(payload?.answer_text || "") || payload?.answer_text || fallbackAnswerText || "(空回答)";
-  view.setMainText(summaryText);
+  const fallbackText = stripReferenceLines(payload?.answer_text || "") || stripReferenceLines(fallbackAnswerText || "") || "未获取到回答内容";
+  const sanitizedHtml = sanitizeAnswerHtml(payload?.answer_html || "");
+
+  if (sanitizedHtml) {
+    view.setMainHtml(sanitizedHtml);
+  } else {
+    view.setMainText(fallbackText);
+  }
 
   const thinkingText = String(payload?.thinking_text || fallbackThinkingText || "").trim();
   view.finalizeThinking(thinkingText);
 
   const artifacts = extractHtmlArtifacts(payload?.answer_html || "");
-  const metaTexts = [];
-  if (references.length) {
-    metaTexts.push(`${references.length} 条引用`);
-  }
-  if (artifacts.tableCount) {
-    metaTexts.push(`${artifacts.tableCount} 个表格`);
-  }
-  view.setMeta(metaTexts);
-
-  const detailStack = document.createElement("div");
-  detailStack.className = "detail-stack";
-  appendSourceSection(detailStack, references, artifacts);
-  appendRichSection(detailStack, payload?.answer_html || "", artifacts);
-  view.setDetails(detailStack);
+  const sources = buildSourceItems(references, artifacts);
+  view.setSources(sources, references);
 }
 
 async function fetchJson(url, options = undefined) {
   const resp = await fetch(url, options);
   const contentType = resp.headers.get("content-type") || "";
-  const data = contentType.includes("application/json") ? await resp.json() : null;
+  let data = null;
+  if (contentType.includes("application/json")) {
+    data = await resp.json();
+  }
   return { resp, data };
+}
+
+async function loadUiConfig() {
+  const { resp, data } = await fetchJson("/api/ui-config");
+  if (!resp.ok || !data) {
+    throw new Error("读取界面配置失败");
+  }
+  applyModelCatalog(data);
+  return data;
 }
 
 async function refreshHealth() {
@@ -796,18 +1171,20 @@ async function refreshHealth() {
       throw new Error("读取健康状态失败");
     }
     setHealthStatus(data);
+    return data;
   } catch (_) {
-    setStatus("error", "无法连接后端服务");
+    setHealthStatus({ ok: false });
+    return null;
   }
 }
 
-async function readJsonLines(resp, onLine) {
-  if (!resp.body) {
-    throw new Error("流式响应不可用");
+async function readJsonLines(response, onLine) {
+  if (!response.body) {
+    throw new Error("STREAM_NOT_SUPPORTED");
   }
 
-  const reader = resp.body.getReader();
-  const decoder = new TextDecoder("utf-8");
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
   let buffer = "";
 
   while (true) {
@@ -836,7 +1213,6 @@ async function readJsonLines(resp, onLine) {
 
 async function askQuestion(question) {
   noteActivity();
-  noteActivity();
   appendUserMessage(question);
   const assistantView = createAssistantView();
   assistantView.queueMainText("正在生成回答…");
@@ -846,20 +1222,31 @@ async function askQuestion(question) {
   let donePayload = null;
   let streamAnswerText = "";
   let streamThinkingText = "";
+  const payload = { question };
+  if (selectedModel) {
+    payload.model = selectedModel;
+  }
 
   try {
     const resp = await fetch("/api/ask-stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question }),
+      body: JSON.stringify(payload),
     });
 
     if (!resp.ok) {
-      const payload = await resp.json();
-      throw new Error(formatApiError(payload));
+      let errorPayload = null;
+      try {
+        errorPayload = await resp.json();
+      } catch (_) {
+        errorPayload = { error_code: "REQUEST_FAILED", error_message: `HTTP ${resp.status}` };
+      }
+      throw new Error(formatApiError(errorPayload));
     }
 
     await readJsonLines(resp, (event) => {
+      noteActivity();
+
       if (event.type === "thinking_delta") {
         streamThinkingText = typeof event.text === "string" ? event.text : `${streamThinkingText}${event.delta || ""}`;
         assistantView.queueThinkingText(streamThinkingText, { streaming: true });
@@ -900,11 +1287,10 @@ async function askQuestion(question) {
     assistantView.row.classList.remove("is-streaming");
     assistantView.setMainText(error instanceof Error ? error.message : String(error));
     assistantView.finalizeThinking(streamThinkingText);
-    assistantView.setMeta([]);
+    assistantView.setSources([], []);
     setStatus("error", "请求失败");
   } finally {
     setBusy(false);
-    questionEl.focus();
   }
 }
 
@@ -915,6 +1301,7 @@ composer.addEventListener("submit", async (event) => {
     return;
   }
   questionEl.value = "";
+  syncQuestionHeight();
   syncComposerState();
   await askQuestion(question);
 });
@@ -927,15 +1314,36 @@ questionEl.addEventListener("keydown", async (event) => {
       return;
     }
     questionEl.value = "";
+    syncQuestionHeight();
     syncComposerState();
     await askQuestion(question);
   }
 });
 
 questionEl.addEventListener("input", () => {
+  syncQuestionHeight();
   syncComposerState();
   noteActivity();
 });
+
+chat.addEventListener("scroll", () => {
+  shouldAutoScroll = isChatNearBottom();
+  noteActivity();
+}, { passive: true });
+
+if (thinkingToggle) {
+  thinkingToggle.addEventListener("change", () => {
+    setThinkingVisibility(thinkingToggle.checked);
+    noteActivity();
+  });
+}
+
+if (modelSelect) {
+  modelSelect.addEventListener("change", () => {
+    selectedModel = modelSelect.value;
+    noteActivity();
+  });
+}
 
 clearBtn.addEventListener("click", () => {
   clearConversation();
@@ -951,7 +1359,7 @@ sourceDrawerOpenLink.addEventListener("click", (event) => {
 });
 sourceDrawerFrame.addEventListener("load", () => {
   if (!sourceDrawer.hidden) {
-    sourceDrawerStatus.textContent = "已尝试加载原文预览；若未显示，请直接打开原文。";
+    sourceDrawerStatus.textContent = "已尝试加载原文预览；如果未显示，请直接打开原文。";
   }
 });
 document.addEventListener("keydown", (event) => {
@@ -968,9 +1376,13 @@ window.addEventListener("pageshow", (event) => {
 });
 
 async function bootstrap() {
+  setThinkingVisibility(thinkingToggle ? thinkingToggle.checked : true);
   setBusy(false);
   clearConversation({ focus: false });
-  await refreshHealth();
+  syncQuestionHeight();
+  syncComposerState();
+  void loadUiConfig().catch(() => applyModelCatalog());
+  void refreshHealth();
   setInterval(refreshHealth, 15000);
   noteActivity();
   questionEl.focus();

@@ -20,6 +20,12 @@ THINKING_SPLIT_RE = re.compile(
     r"(?:最终回答|回答|答复|final answer|answer)\s*[:：-]?\s*(.+)",
     re.IGNORECASE | re.DOTALL,
 )
+KB_EMPTY_ANSWER_HINTS = (
+    "没有找到相关的知识库内容",
+    "未找到相关的知识库内容",
+    "没有找到相关知识库内容",
+    "未找到相关知识库内容",
+)
 
 
 @dataclass(frozen=True)
@@ -99,21 +105,24 @@ class WebAnswerExtractor:
         try:
             raw_text = node.inner_text(timeout=1500).strip()
             container_text = container.inner_text(timeout=1500).strip()
-            raw_html = self.compose_answer_html(page, node)
+            raw_html = self.compose_answer_html(page, container)
         except Exception:
             return None
 
         dom_payload = self.extract_dom_segments(container)
         thinking_text = self.clean_thinking_text(dom_payload.thinking_text)
+        dom_answer_candidate = self.clean_ai_text(dom_payload.answer_text or container_text)
 
         answer_candidate = self.clean_ai_text(raw_text)
         if not answer_candidate:
-            answer_candidate = self.clean_ai_text(dom_payload.answer_text or container_text)
+            answer_candidate = dom_answer_candidate
+        else:
+            answer_candidate = self._prefer_richer_answer_candidate(answer_candidate, dom_answer_candidate)
 
         if thinking_text:
             answer_candidate = self.remove_fragment(answer_candidate, thinking_text)
 
-        split_source = answer_candidate or self.clean_ai_text(container_text)
+        split_source = answer_candidate or dom_answer_candidate or self.clean_ai_text(container_text)
         split = self.split_thinking_answer(split_source)
         if split.matched:
             if not thinking_text:
@@ -124,6 +133,11 @@ class WebAnswerExtractor:
         answer_candidate = self._normalize_answer_candidate(answer_candidate)
         if not answer_candidate and dom_payload.answer_text:
             answer_candidate = self._normalize_answer_candidate(self.clean_ai_text(dom_payload.answer_text))
+        elif dom_payload.answer_text:
+            answer_candidate = self._prefer_richer_answer_candidate(
+                answer_candidate,
+                self._normalize_answer_candidate(self.clean_ai_text(dom_payload.answer_text)),
+            )
 
         if not answer_candidate and not thinking_text:
             return None
@@ -465,6 +479,25 @@ class WebAnswerExtractor:
         while lines and not lines[-1]:
             lines.pop()
         return "\n".join(lines).strip()
+
+    def _prefer_richer_answer_candidate(self, primary: str, secondary: str) -> str:
+        primary_text = str(primary or "").strip()
+        secondary_text = str(secondary or "").strip()
+        if not primary_text:
+            return secondary_text
+        if not secondary_text or secondary_text == primary_text:
+            return primary_text
+        if self._is_empty_kb_answer(primary_text) and not self._is_empty_kb_answer(secondary_text):
+            return secondary_text
+        if self._is_empty_kb_answer(primary_text) and len(secondary_text) > len(primary_text):
+            return secondary_text
+        if primary_text in secondary_text and len(secondary_text) >= len(primary_text) + 16:
+            return secondary_text
+        return primary_text
+
+    def _is_empty_kb_answer(self, text: str) -> bool:
+        normalized = str(text or "").strip()
+        return any(hint in normalized for hint in KB_EMPTY_ANSWER_HINTS)
 
     def extract_references(self, answer_text: str) -> list[str]:
         references: list[str] = []

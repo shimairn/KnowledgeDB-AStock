@@ -56,6 +56,12 @@ def _extract_question(payload: dict[str, Any] | None) -> str:
     return str(value).strip()
 
 
+def _extract_model(payload: dict[str, Any] | None) -> str | None:
+    value = "" if payload is None else payload.get("model", "")
+    normalized = str(value).strip()
+    return normalized or None
+
+
 def _kb_label(settings: Settings) -> str:
     return f"{settings.kb_name} / {settings.kb_owner} / {settings.kb_title}"
 
@@ -100,6 +106,7 @@ def _build_stream(
     rate_limiter: UIRateLimiter,
     client_ip: str,
     question: str,
+    model: str | None,
 ) -> Iterator[str]:
     events: queue.Queue[dict[str, Any] | object] = queue.Queue()
     done_marker = object()
@@ -115,7 +122,7 @@ def _build_stream(
                 event_type = "thinking_delta" if phase == "thinking" else "delta"
                 events.put({"type": event_type, "delta": delta, "text": text})
 
-            response = worker.service.ask_with_updates(question=question, on_update=on_update)
+            response = worker.service.ask_with_updates(question=question, model=model, on_update=on_update)
             pool_manager.release(worker, response=response)
             events.put({"type": "done", "response": response.model_dump()})
         except Exception as exc:
@@ -181,6 +188,7 @@ def create_chat_ui_app(
     @app.get("/api/ui-config")
     def api_ui_config() -> JSONResponse:
         summary = pool.summarize()
+        model_catalog = pool.get_model_catalog()
         return JSONResponse(
             {
                 "ok": True,
@@ -188,6 +196,7 @@ def create_chat_ui_app(
                 "auth_required": False,
                 "driver_mode": settings.driver_mode,
                 "workers_total": summary.workers_total,
+                **model_catalog.model_dump(),
             }
         )
 
@@ -203,6 +212,7 @@ def create_chat_ui_app(
     @app.post("/api/ask")
     def api_ask(request: Request, payload: dict[str, Any] | None = Body(default=None)) -> JSONResponse:
         question = _extract_question(payload)
+        model = _extract_model(payload)
         if not question:
             return _json_error("ASK_TIMEOUT", "question is required", status_code=400)
 
@@ -217,7 +227,7 @@ def create_chat_ui_app(
             return _busy_response()
 
         try:
-            response = worker.service.ask(question)
+            response = worker.service.ask(question=question, model=model)
             pool.release(worker, response=response)
             return JSONResponse(response.model_dump())
         except Exception as exc:
@@ -229,6 +239,7 @@ def create_chat_ui_app(
     @app.post("/api/ask-stream")
     def api_ask_stream(request: Request, payload: dict[str, Any] | None = Body(default=None)) -> Response:
         question = _extract_question(payload)
+        model = _extract_model(payload)
         if not question:
             return _json_error("ASK_TIMEOUT", "question is required", status_code=400)
 
@@ -249,6 +260,7 @@ def create_chat_ui_app(
                 rate_limiter=limiter,
                 client_ip=client_ip,
                 question=question,
+                model=model,
             ),
             media_type="application/x-ndjson",
             headers={"Cache-Control": "no-store"},
@@ -273,8 +285,9 @@ def run_chat_ui(
         worker_count=workers if workers is not None else service.settings.ui_worker_count,
     )
     pool_manager.seed_profiles_from(service.settings)
-    pool_manager.refresh_all()
     app = create_chat_ui_app(service=service, pool_manager=pool_manager)
+
+    threading.Thread(target=pool_manager.refresh_all, daemon=True).start()
 
     browser_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
     url = f"http://{browser_host}:{port}/"

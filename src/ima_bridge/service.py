@@ -4,7 +4,7 @@ from typing import Callable
 
 from ima_bridge.config import Settings, get_settings
 from ima_bridge.driver_adapters import LegacyAppServiceDriver, WebServiceDriver
-from ima_bridge.driver_protocol import AskDriver
+from ima_bridge.driver_protocol import AskDriver, DriverModelCatalog
 from ima_bridge.errors import BridgeError, CaptureFailedError
 from ima_bridge.cdp_driver import CdpAskDriver
 from ima_bridge.managed_app import ManagedIMAApp
@@ -121,9 +121,13 @@ class IMAAskService:
                 error_message=fallback.message,
             )
 
+    def get_model_catalog(self) -> DriverModelCatalog:
+        return self.ask_driver.get_model_catalog()
+
     def ask_with_updates(
         self,
         question: str,
+        model: str | None = None,
         on_update: Callable[..., None] | None = None,
     ) -> AskResponse:
         kb = KnowledgeBaseIdentity(name=self.settings.kb_name, owner=self.settings.kb_owner, title=self.settings.kb_title)
@@ -132,15 +136,16 @@ class IMAAskService:
             question=question,
             knowledge_base=kb,
             mode=self.settings.mode_name,
-            model=self.settings.model_prefix,
+            model=model or self.settings.model_prefix,
             source_driver="web" if self.settings.driver_mode == "web" else "app",
             captured_at=now_iso(),
         )
         try:
-            result = self.ask_driver.ask(question=question, on_update=on_update)
+            result = self.ask_driver.ask(question=question, model=model, on_update=on_update)
             return base.model_copy(
                 update={
                     "ok": True,
+                    "model": result.model or base.model,
                     "source_driver": result.source_driver,
                     "thinking_text": result.thinking_text,
                     "answer_text": result.answer_text,
@@ -158,5 +163,5 @@ class IMAAskService:
             fallback = CaptureFailedError(str(exc))
             return base.model_copy(update={"error_code": fallback.error_code, "error_message": fallback.message})
 
-    def ask(self, question: str) -> AskResponse:
-        return self.ask_with_updates(question=question, on_update=None)
+    def ask(self, question: str, model: str | None = None) -> AskResponse:
+        return self.ask_with_updates(question=question, model=model, on_update=None)

@@ -6,11 +6,64 @@ from typing import Callable
 from playwright.sync_api import Locator, Page
 
 from ima_bridge.config import Settings
+from ima_bridge.driver_protocol import DriverModelCatalog, DriverModelOption
 from ima_bridge.errors import AskTimeoutError, ConfigMismatchError
-from ima_bridge.probes import COMPOSER_SELECTORS, LOADING_HINTS, SEND_CONTROL_SELECTORS
+from ima_bridge.probes import (
+    COMPOSER_SELECTORS,
+    LOADING_HINTS,
+    MODEL_OPTION_DESC_SELECTOR,
+    MODEL_OPTION_NAME_SELECTOR,
+    MODEL_OPTION_SELECTED_HINT,
+    MODEL_OPTION_SELECTOR,
+    MODEL_TITLE_SELECTORS,
+    MODEL_TRIGGER_SELECTORS,
+    SEND_CONTROL_SELECTORS,
+)
 
 from .answer_extractor import WebAnswerExtractor
 from .session import WebSession
+
+
+def normalize_model_text(text: str) -> str:
+    normalized = str(text or "").casefold().strip()
+    replacements = {
+        "deepseek": "ds",
+        "thinking": "t",
+        "think": "t",
+        "tencent": "",
+        "hunyuan": "hy",
+        "娣峰厓": "hy",
+    }
+    for source, target in replacements.items():
+        normalized = normalized.replace(source, target)
+    return "".join(ch for ch in normalized if ch.isalnum())
+
+
+def match_model_option(target: str | None, options: list[DriverModelOption]) -> DriverModelOption | None:
+    normalized_target = normalize_model_text(target or "")
+    if not normalized_target:
+        return next((option for option in options if option.selected), None)
+
+    for option in options:
+        if option.value == target or option.label == target:
+            return option
+
+    exact_match = next(
+        (
+            option
+            for option in options
+            if normalize_model_text(option.value or option.label) == normalized_target
+        ),
+        None,
+    )
+    if exact_match is not None:
+        return exact_match
+
+    for option in options:
+        option_key = normalize_model_text(option.value or option.label)
+        if option_key.startswith(normalized_target) or normalized_target.startswith(option_key):
+            return option
+    return None
 
 
 class WebConversationRunner:
@@ -26,6 +79,100 @@ class WebConversationRunner:
         if self.find_composer(page) is not None:
             return
         raise ConfigMismatchError(f"Expected mode not visible: {self.settings.mode_name}")
+
+    def discover_model_catalog(
+        self,
+        page: Page,
+        preferred_model: str | None = None,
+        *,
+        strict: bool = False,
+    ) -> DriverModelCatalog:
+        self.ensure_mode_model(page)
+
+        current_model = self.current_model_label(page)
+        trigger = self.find_model_trigger(page)
+        if trigger is None:
+            return self._fallback_catalog(current_model or preferred_model or "")
+
+        if not self._click_with_fallback(page, trigger):
+            return self._fallback_catalog(current_model or preferred_model or "")
+
+        page.wait_for_timeout(160)
+        options = self._collect_model_options(page)
+        if not options:
+            self._close_model_menu(page)
+            return self._fallback_catalog(current_model or preferred_model or "")
+
+        selected_option = match_model_option(current_model, options)
+        desired_option = match_model_option(preferred_model, options) if preferred_model else None
+
+        if preferred_model and desired_option is None and strict:
+            self._close_model_menu(page)
+            raise ConfigMismatchError(f"Requested model not available: {preferred_model}")
+
+        if desired_option is not None and (selected_option is None or desired_option.value != selected_option.value):
+            option_locator = self._find_model_option_locator(page, desired_option)
+            if option_locator is None or not self._click_with_fallback(page, option_locator):
+                self._close_model_menu(page)
+                if strict:
+                    raise ConfigMismatchError(f"Requested model not available: {preferred_model}")
+            else:
+                page.wait_for_timeout(220)
+                selected_option = desired_option
+                current_model = desired_option.label
+                options = self._mark_selected_option(options, desired_option)
+
+        self._close_model_menu(page)
+
+        if not current_model:
+            selected_option = selected_option or next((option for option in options if option.selected), None)
+            if selected_option is not None:
+                current_model = selected_option.label
+
+        return DriverModelCatalog(current_model=current_model, options=options)
+
+    def ensure_selected_model(self, page: Page, requested_model: str | None = None) -> str:
+        preferred_model = requested_model or self.settings.model_prefix
+        catalog = self.discover_model_catalog(page, preferred_model=preferred_model, strict=bool(requested_model))
+        return catalog.current_model or preferred_model or ""
+
+    def start_new_conversation(self, page: Page) -> bool:
+        action = self.find_new_conversation_action(page)
+        if action is None:
+            return False
+
+        if not self._click_with_fallback(page, action):
+            return False
+
+        page.wait_for_timeout(420)
+        return self.find_composer(page) is not None
+
+    def find_new_conversation_action(self, page: Page) -> Locator | None:
+        text_locators = (
+            page.get_by_role("button", name="新建对话"),
+            page.get_by_text("新建对话", exact=False),
+            page.locator("button").filter(has_text="新建对话"),
+            page.locator("[role='button']").filter(has_text="新建对话"),
+        )
+        for locator in text_locators:
+            candidate = self._first_visible_locator(locator)
+            if candidate is not None:
+                return candidate
+
+        history_header = self.find_history_header(page)
+        if history_header is None:
+            return None
+
+        toolbar = history_header.locator("xpath=preceding-sibling::*[1]")
+        for locator in (
+            toolbar.locator("div[class*='iconWrap']"),
+            toolbar.locator("button"),
+            toolbar.locator("[role='button']"),
+        ):
+            candidate = self._first_visible_locator(locator)
+            if candidate is not None:
+                return candidate
+        return None
 
     def submit_question(self, page: Page, question: str) -> None:
         if not question.strip():
@@ -70,6 +217,56 @@ class WebConversationRunner:
                 if candidate.is_visible():
                     return candidate
         return None
+
+    def find_history_header(self, page: Page) -> Locator | None:
+        for selector in ("div[class*='historyHeader']", "div[class*='chatSidePanelHeader']"):
+            locator = page.locator(selector)
+            try:
+                count = locator.count()
+            except Exception:
+                continue
+
+            for index in range(count):
+                candidate = locator.nth(index)
+                try:
+                    if candidate.is_visible() and "闂瓟鍘嗗彶" in self._safe_locator_text(candidate):
+                        return candidate
+                except Exception:
+                    continue
+
+        locator = page.get_by_text("闂瓟鍘嗗彶", exact=False)
+        try:
+            if locator.count() == 0:
+                return None
+            header = locator.first.locator("xpath=ancestor::div[contains(@class, 'chatSidePanelHeader')][1]")
+            return header.first if header.count() > 0 else None
+        except Exception:
+            return None
+
+    def find_model_trigger(self, page: Page) -> Locator | None:
+        for selector in MODEL_TRIGGER_SELECTORS:
+            locator = page.locator(selector)
+            count = locator.count()
+            for index in range(count):
+                candidate = locator.nth(index)
+                try:
+                    if candidate.is_visible():
+                        return candidate
+                except Exception:
+                    continue
+        return None
+
+    def current_model_label(self, page: Page) -> str:
+        trigger = self.find_model_trigger(page)
+        if trigger is None:
+            return ""
+
+        for selector in MODEL_TITLE_SELECTORS:
+            text = self._first_visible_locator_text(trigger.locator(selector))
+            if text:
+                return text
+
+        return self._first_line(self._safe_locator_text(trigger))
 
     def wait_answer(
         self,
@@ -156,6 +353,149 @@ class WebConversationRunner:
         if delta:
             on_update(phase, delta, normalized)
         return normalized
+
+    def _collect_model_options(self, page: Page) -> list[DriverModelOption]:
+        locator = page.locator(MODEL_OPTION_SELECTOR)
+        options: list[DriverModelOption] = []
+        try:
+            count = locator.count()
+        except Exception:
+            return options
+
+        for index in range(count):
+            candidate = locator.nth(index)
+            try:
+                if not candidate.is_visible():
+                    continue
+            except Exception:
+                continue
+
+            label = self._first_visible_locator_text(candidate.locator(MODEL_OPTION_NAME_SELECTOR))
+            if not label:
+                label = self._first_line(self._safe_locator_text(candidate))
+            if not label:
+                continue
+
+            description = self._first_visible_locator_text(candidate.locator(MODEL_OPTION_DESC_SELECTOR))
+            class_name = (candidate.get_attribute("class") or "").casefold()
+            selected = MODEL_OPTION_SELECTED_HINT.casefold() in class_name or "selected" in class_name
+            options.append(
+                DriverModelOption(
+                    value=label,
+                    label=label,
+                    description=description,
+                    selected=selected,
+                )
+            )
+
+        deduped: list[DriverModelOption] = []
+        seen: set[str] = set()
+        for option in options:
+            key = normalize_model_text(option.value or option.label)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(option)
+        return deduped
+
+    def _find_model_option_locator(self, page: Page, option: DriverModelOption) -> Locator | None:
+        locator = page.locator(MODEL_OPTION_SELECTOR)
+        try:
+            count = locator.count()
+        except Exception:
+            return None
+
+        target_key = normalize_model_text(option.value or option.label)
+        for index in range(count):
+            candidate = locator.nth(index)
+            try:
+                if not candidate.is_visible():
+                    continue
+            except Exception:
+                continue
+
+            label = self._first_visible_locator_text(candidate.locator(MODEL_OPTION_NAME_SELECTOR))
+            if not label:
+                label = self._first_line(self._safe_locator_text(candidate))
+            if normalize_model_text(label) == target_key:
+                return candidate
+        return None
+
+    def _mark_selected_option(
+        self,
+        options: list[DriverModelOption],
+        selected_option: DriverModelOption,
+    ) -> list[DriverModelOption]:
+        target_key = normalize_model_text(selected_option.value or selected_option.label)
+        return [
+            DriverModelOption(
+                value=option.value,
+                label=option.label,
+                description=option.description,
+                selected=normalize_model_text(option.value or option.label) == target_key,
+            )
+            for option in options
+        ]
+
+    def _fallback_catalog(self, current_model: str) -> DriverModelCatalog:
+        label = str(current_model or "").strip()
+        options = [DriverModelOption(value=label, label=label, selected=True)] if label else []
+        return DriverModelCatalog(current_model=label, options=options)
+
+    def _close_model_menu(self, page: Page) -> None:
+        try:
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(80)
+        except Exception:
+            pass
+
+    def _first_visible_locator_text(self, locator: Locator) -> str:
+        try:
+            count = locator.count()
+        except Exception:
+            return ""
+
+        for index in range(count):
+            candidate = locator.nth(index)
+            try:
+                if not candidate.is_visible():
+                    continue
+            except Exception:
+                continue
+
+            text = self._first_line(self._safe_locator_text(candidate))
+            if text:
+                return text
+        return ""
+
+    def _safe_locator_text(self, locator: Locator) -> str:
+        try:
+            return (locator.inner_text(timeout=800) or "").strip()
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _first_line(text: str) -> str:
+        for line in str(text or "").splitlines():
+            normalized = line.strip()
+            if normalized:
+                return normalized
+        return ""
+
+    def _first_visible_locator(self, locator: Locator) -> Locator | None:
+        try:
+            count = locator.count()
+        except Exception:
+            return None
+
+        for index in range(count):
+            candidate = locator.nth(index)
+            try:
+                if candidate.is_visible():
+                    return candidate
+            except Exception:
+                continue
+        return None
 
     def _click_locator_candidates(self, page: Page, locator: Locator, max_candidates: int = 8) -> bool:
         try:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from urllib.parse import urlparse
 
 from playwright.sync_api import Locator, Page
 
@@ -64,7 +65,7 @@ class WebKnowledgeBaseNavigator:
     def probe_target_entries(self, page: Page) -> bool:
         for probe in self._probe_texts():
             locator = page.get_by_text(probe, exact=False)
-            if not self.click_locator_candidates(page, locator):
+            if not self.click_target_entry_candidates(page, locator):
                 continue
             page.wait_for_timeout(900)
             if self.confirm_target_context(page):
@@ -75,6 +76,14 @@ class WebKnowledgeBaseNavigator:
         if self.identity_score(body_text) <= 0:
             return False
         return self.target_score(body_text) >= MIN_TARGET_SCORE
+
+    def page_has_target_signals(self, page: Page, body_text: str | None = None) -> bool:
+        text = body_text if body_text is not None else self.session.body_text(page)
+        if not self.has_target_signals(text):
+            return False
+        if not self._is_generic_target_page(page.url):
+            return True
+        return self._contains(text, self.settings.kb_owner) or CONTENT_PREFIX in text
 
     def target_score(self, body_text: str) -> int:
         score = self.identity_score(body_text)
@@ -99,6 +108,8 @@ class WebKnowledgeBaseNavigator:
         best_score = -1
         for candidate in pages:
             text = self.session.body_text(candidate)
+            if not self.page_has_target_signals(candidate, text):
+                continue
             score = self.target_score(text)
             if score > best_score:
                 best_score = score
@@ -109,7 +120,7 @@ class WebKnowledgeBaseNavigator:
 
     def confirm_target_context(self, page: Page) -> bool:
         body_text = self.session.body_text(page)
-        if self.has_target_signals(body_text):
+        if self.page_has_target_signals(page, body_text):
             self.remember_target_url(page, body_text)
             return True
 
@@ -118,7 +129,7 @@ class WebKnowledgeBaseNavigator:
             return False
 
         target_text = self.session.body_text(target_page)
-        if not self.has_target_signals(target_text):
+        if not self.page_has_target_signals(target_page, target_text):
             return False
 
         self.remember_target_url(target_page, target_text)
@@ -132,6 +143,21 @@ class WebKnowledgeBaseNavigator:
 
         for index in range(min(count, max_candidates)):
             candidate = locator.nth(index)
+            if self.click_with_fallback(page, candidate):
+                return True
+        return False
+
+    def click_target_entry_candidates(self, page: Page, locator: Locator, max_candidates: int = 8) -> bool:
+        try:
+            count = locator.count()
+        except Exception:
+            return False
+
+        for index in range(min(count, max_candidates)):
+            candidate = locator.nth(index)
+            card = candidate.locator("xpath=ancestor::div[contains(@class, 'knowledgeListItem')][1]").first
+            if self.click_with_fallback(page, card):
+                return True
             if self.click_with_fallback(page, candidate):
                 return True
         return False
@@ -207,3 +233,10 @@ class WebKnowledgeBaseNavigator:
 
     def _canonical_text(self, value: str) -> str:
         return _CANONICAL_TEXT_RE.sub("", (value or "").strip()).lower()
+
+    def _is_generic_target_page(self, url: str) -> bool:
+        normalized = self.store.normalize_url(url)
+        if normalized is None:
+            return False
+        path = urlparse(normalized).path.rstrip("/")
+        return path in self.store.generic_paths

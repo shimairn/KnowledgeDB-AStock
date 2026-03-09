@@ -49,6 +49,22 @@ SEND_CONTROL_SELECTORS = (
     "#chat-input-bar-id [class*='sendBtnWrap']",
 )
 
+MODEL_TRIGGER_SELECTORS = (
+    "div[class*='_modelWrap_'] div[class*='_currentChoiceWrap_']",
+    "div[class*='_currentChoiceWrap_']",
+    "div[class*='_modelWrap_']",
+)
+
+MODEL_TITLE_SELECTORS = (
+    "div[class*='_title_']",
+    "[class*='_title_']",
+)
+
+MODEL_OPTION_SELECTOR = "div[class*='_modelOption_']"
+MODEL_OPTION_NAME_SELECTOR = "div[class*='_name_']"
+MODEL_OPTION_DESC_SELECTOR = "div[class*='_desc_']"
+MODEL_OPTION_SELECTED_HINT = "_selected_"
+
 AI_CONTAINER_SELECTORS = (
     "div[class*='normalModeAiBubbleWrapper'] div[class*='aiContainer']",
     "div[class*='aiContainer_']",

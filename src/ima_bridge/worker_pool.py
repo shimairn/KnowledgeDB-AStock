@@ -6,6 +6,7 @@ from threading import Lock
 from typing import Callable, Literal
 
 from ima_bridge.config import Settings, get_settings
+from ima_bridge.driver_protocol import DriverModelCatalog, DriverModelOption
 from ima_bridge.profile_sync import sync_profile_state
 from ima_bridge.schemas import AskResponse, HealthResponse
 from ima_bridge.service import IMAAskService
@@ -54,6 +55,7 @@ class WorkerPoolManager:
         self.worker_count = max(1, worker_count)
         self._service_factory = service_factory or (lambda settings: IMAAskService(settings=settings))
         self._lock = Lock()
+        self._cached_model_catalog = self._fallback_model_catalog()
         self._workers = [self._build_worker_slot(index=index) for index in range(1, self.worker_count + 1)]
 
     @property
@@ -175,6 +177,26 @@ class WorkerPoolManager:
                 worker.last_error_message = None
                 seeded += 1
         return seeded
+
+    def get_model_catalog(self) -> DriverModelCatalog:
+        worker = self.try_acquire()
+        if worker is None:
+            return self._cached_model_catalog
+
+        try:
+            catalog = worker.service.get_model_catalog()
+            if catalog.options or catalog.current_model:
+                self._cached_model_catalog = catalog
+            return catalog
+        except Exception:
+            return self._cached_model_catalog
+        finally:
+            self.release(worker)
+
+    def _fallback_model_catalog(self) -> DriverModelCatalog:
+        label = self.template_settings.model_prefix.strip()
+        options = [DriverModelOption(value=label, label=label, selected=True)] if label else []
+        return DriverModelCatalog(current_model=label, options=options)
 
     @staticmethod
     def _status_from_health(health: HealthResponse) -> WorkerStatus:

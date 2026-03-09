@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from ima_bridge.chat_ui import create_chat_ui_app
 from ima_bridge.config import get_settings
+from ima_bridge.driver_protocol import DriverModelCatalog, DriverModelOption
 from ima_bridge.schemas import AskResponse, KnowledgeBaseIdentity, LoginResponse
 from ima_bridge.ui_rate_limit import UIRateLimiter
 
@@ -55,15 +56,39 @@ class FakeWorkerService:
         stream_error: Exception | None = None,
         stream_updates: list[tuple[str, str, str]] | None = None,
         response: AskResponse | None = None,
+        model_catalog: DriverModelCatalog | None = None,
     ) -> None:
         self.stream_error = stream_error
         self.stream_updates = stream_updates or [("answer", "chunk", "full chunk")]
         self.response = response
+        self.model_catalog = model_catalog or DriverModelCatalog(
+            current_model="DeepSeek V3.2 Think",
+            options=[
+                DriverModelOption(
+                    value="DeepSeek V3.2 Think",
+                    label="DeepSeek V3.2 Think",
+                    description="适合深度推理",
+                    selected=True,
+                ),
+                DriverModelOption(
+                    value="DeepSeek V3.2",
+                    label="DeepSeek V3.2",
+                    description="适合常规回答",
+                    selected=False,
+                ),
+            ],
+        )
+        self.last_model: str | None = None
 
-    def ask(self, question: str) -> AskResponse:
+    def get_model_catalog(self) -> DriverModelCatalog:
+        return self.model_catalog
+
+    def ask(self, question: str, model: str | None = None) -> AskResponse:
+        self.last_model = model
         return self.response or _make_ask_response(question)
 
-    def ask_with_updates(self, question: str, on_update=None) -> AskResponse:
+    def ask_with_updates(self, question: str, model: str | None = None, on_update=None) -> AskResponse:
+        self.last_model = model
         if on_update is not None:
             for update in self.stream_updates:
                 on_update(*update)
@@ -120,6 +145,11 @@ class FakePoolManager:
     def health_payload(self) -> dict:
         return dict(self.payload)
 
+    def get_model_catalog(self) -> DriverModelCatalog:
+        if self.worker is not None:
+            return self.worker.service.get_model_catalog()
+        return DriverModelCatalog()
+
     def try_acquire(self):
         worker = self.worker
         self.worker = None
@@ -158,6 +188,8 @@ def test_chat_ui_ui_config_and_health_are_anonymous(tmp_path, monkeypatch):
     assert config_response.json()["auth_required"] is False
     assert config_response.json()["workers_total"] == 1
     assert settings.kb_name in config_response.json()["kb_label"]
+    assert config_response.json()["current_model"] == "DeepSeek V3.2 Think"
+    assert config_response.json()["model_options"][0]["label"] == "DeepSeek V3.2 Think"
     assert health_response.status_code == 200
     assert health_response.json()["ok"] is True
     assert client.app.state.pool_manager.refresh_calls == 0
@@ -222,6 +254,19 @@ def test_chat_ui_stream_emits_thinking_and_done_payload(tmp_path, monkeypatch):
     assert response.status_code == 200
     assert [event["type"] for event in events] == ["start", "thinking_delta", "thinking_delta", "delta", "done"]
     assert events[-1]["response"]["thinking_text"] == "thought more"
+
+
+def test_chat_ui_forwards_selected_model_to_service(tmp_path, monkeypatch):
+    settings = _make_settings(tmp_path, monkeypatch)
+    service = type("Service", (), {"settings": settings})()
+    fake_service = FakeWorkerService(response=_make_ask_response("hello", answer_text="answer"))
+    worker = type("Worker", (), {"worker_id": "worker-01", "service": fake_service})()
+    client = TestClient(create_chat_ui_app(service=service, pool_manager=FakePoolManager(worker=worker)))
+
+    response = client.post("/api/ask", json={"question": "hello", "model": "DeepSeek V3.2"})
+
+    assert response.status_code == 200
+    assert fake_service.last_model == "DeepSeek V3.2"
 
 
 def test_chat_ui_stream_error_after_thinking_emits_error(tmp_path, monkeypatch):
