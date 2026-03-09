@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 
@@ -54,12 +54,12 @@ class FakeWorkerService:
         self,
         *,
         stream_error: Exception | None = None,
-        stream_updates: list[tuple[str, str, str]] | None = None,
+        stream_updates: list[object] | None = None,
         response: AskResponse | None = None,
         model_catalog: DriverModelCatalog | None = None,
     ) -> None:
         self.stream_error = stream_error
-        self.stream_updates = stream_updates or [("answer", "chunk", "full chunk")]
+        self.stream_updates = stream_updates or [{"phase": "answer_html", "html": "<p>chunk</p>"}]
         self.response = response
         self.model_catalog = model_catalog or DriverModelCatalog(
             current_model="DeepSeek V3.2 Think",
@@ -67,13 +67,13 @@ class FakeWorkerService:
                 DriverModelOption(
                     value="DeepSeek V3.2 Think",
                     label="DeepSeek V3.2 Think",
-                    description="适合深度推理",
+                    description="更适合复杂推理",
                     selected=True,
                 ),
                 DriverModelOption(
                     value="DeepSeek V3.2",
                     label="DeepSeek V3.2",
-                    description="适合常规回答",
+                    description="更适合直接回答",
                     selected=False,
                 ),
             ],
@@ -91,7 +91,10 @@ class FakeWorkerService:
         self.last_model = model
         if on_update is not None:
             for update in self.stream_updates:
-                on_update(*update)
+                if isinstance(update, dict):
+                    on_update(update)
+                else:
+                    on_update(*update)
         if self.stream_error is not None:
             raise self.stream_error
         return self.response or _make_ask_response(question)
@@ -167,12 +170,61 @@ def test_chat_ui_serves_static_index_and_assets(tmp_path, monkeypatch):
 
     index_response = client.get("/")
     js_response = client.get("/assets/app.js")
+    main_response = client.get("/assets/app-main.js")
+    render_response = client.get("/assets/app-render.js")
+    view_response = client.get("/assets/app-view.js")
 
     assert index_response.status_code == 200
-    assert "id=\"statusText\"" in index_response.text
-    assert "id=\"poolSummary\"" not in index_response.text
+    assert 'type="module"' in index_response.text
+    assert 'id="statusText"' in index_response.text
+    assert 'id="kbLabel"' in index_response.text
+    assert 'id="emptyState"' in index_response.text
+    assert 'id="newConversationBtn"' in index_response.text
+    assert 'id="conversationViewport"' in index_response.text
+    assert 'id="jumpToLatestBtn"' in index_response.text
+    assert 'id="modelMenu"' in index_response.text
+    assert 'id="modelMenuList"' in index_response.text
+    assert 'id="appSidebar"' not in index_response.text
+    assert 'id="sidebarToggleBtn"' not in index_response.text
+    assert 'id="sourceDrawer"' not in index_response.text
+    assert 'id="questionMeta"' not in index_response.text
+    assert 'id="thinkingToggle"' not in index_response.text
+    assert 'id="poolSummary"' not in index_response.text
+    composer_markup = index_response.text.split('<form id="composer"', 1)[1]
+    assert "<header" in index_response.text
+    assert 'id="modelSelect"' not in index_response.text
+    assert 'id="clearBtn"' not in index_response.text
+    assert 'id="questionHint"' not in index_response.text
+    assert 'id="modelMenu"' in composer_markup
+    assert 'id="sendBtn"' in composer_markup
+    assert 'id="newConversationBtn"' in composer_markup
+
     assert js_response.status_code == 200
-    assert "/api/ask-stream" in js_response.text
+    assert main_response.status_code == 200
+    assert render_response.status_code == 200
+    assert view_response.status_code == 200
+    assert "/assets/app-main.js" in js_response.text
+    assert "questionMeta" not in main_response.text
+    assert "sidebarToggleBtn" not in main_response.text
+    assert "sourceDrawer" not in main_response.text
+    assert "modelMenu" in main_response.text
+    assert "jumpToLatestBtn" in main_response.text
+    assert "hasPendingConversationUpdate" in main_response.text
+    assert "createMessageRenderer" in main_response.text
+    assert "prepareAnswerRender" in render_response.text
+    assert "ANSWER_SURFACE_STYLE_TEXT" in render_response.text
+    assert "source-chip" not in view_response.text
+    assert "stream-status" in view_response.text
+    assert "reference-list" not in view_response.text
+    assert "source-list" not in view_response.text
+    assert "bubble-extras" not in view_response.text
+    assert "message-label" not in view_response.text
+    assert "detail-card" not in view_response.text
+    assert "answer-surface" in view_response.text
+    assert 'attachShadow({ mode: "open" })' in view_response.text
+    assert "frame.srcdoc" not in view_response.text
+    assert "answer-frame" not in view_response.text
+    assert "queueMainText" not in view_response.text
 
 
 def test_chat_ui_ui_config_and_health_are_anonymous(tmp_path, monkeypatch):
@@ -223,7 +275,8 @@ def test_chat_ui_stream_success_sequence(tmp_path, monkeypatch):
     assert config_response.status_code == 200
     assert health_response.status_code == 200
     assert response.status_code == 200
-    assert [event["type"] for event in events] == ["start", "delta", "done"]
+    assert [event["type"] for event in events] == ["start", "answer_html", "done"]
+    assert events[1]["html"] == "<p>chunk</p>"
     assert events[-1]["response"]["answer_html"] == "<p>final</p>"
     assert events[-1]["response"]["thinking_text"] == ""
 
@@ -240,7 +293,7 @@ def test_chat_ui_stream_emits_thinking_and_done_payload(tmp_path, monkeypatch):
                 stream_updates=[
                     ("thinking", "thought", "thought"),
                     ("thinking", " more", "thought more"),
-                    ("answer", "answer", "answer"),
+                    {"phase": "answer_html", "html": "<p>answer</p>"},
                 ],
                 response=_make_ask_response("hello", answer_text="answer", thinking_text="thought more"),
             ),
@@ -252,7 +305,8 @@ def test_chat_ui_stream_emits_thinking_and_done_payload(tmp_path, monkeypatch):
         events = [json.loads(line) for line in response.iter_lines() if line]
 
     assert response.status_code == 200
-    assert [event["type"] for event in events] == ["start", "thinking_delta", "thinking_delta", "delta", "done"]
+    assert [event["type"] for event in events] == ["start", "thinking_delta", "thinking_delta", "answer_html", "done"]
+    assert events[3]["html"] == "<p>answer</p>"
     assert events[-1]["response"]["thinking_text"] == "thought more"
 
 
@@ -267,6 +321,53 @@ def test_chat_ui_forwards_selected_model_to_service(tmp_path, monkeypatch):
 
     assert response.status_code == 200
     assert fake_service.last_model == "DeepSeek V3.2"
+
+
+def test_chat_ui_sanitizes_noise_in_ui_responses(tmp_path, monkeypatch):
+    settings = _make_settings(tmp_path, monkeypatch)
+    service = type("Service", (), {"settings": settings})()
+    fake_service = FakeWorkerService(
+        response=_make_ask_response(
+            "hello",
+            answer_text="找到 3 条知识库内容\n\n正式回答",
+            answer_html="<p>找到 3 条知识库内容</p><p>正式回答</p><table><tr><td>3</td></tr></table>",
+        )
+    )
+    worker = type("Worker", (), {"worker_id": "worker-01", "service": fake_service})()
+    client = TestClient(create_chat_ui_app(service=service, pool_manager=FakePoolManager(worker=worker)))
+
+    response = client.post("/api/ask", json={"question": "hello"})
+
+    assert response.status_code == 200
+    assert response.json()["answer_text"] == "正式回答"
+    assert "找到 3 条知识库内容" not in response.json()["answer_html"]
+    assert "<table>" in response.json()["answer_html"]
+
+
+def test_chat_ui_stream_done_payload_is_cleaned(tmp_path, monkeypatch):
+    settings = _make_settings(tmp_path, monkeypatch)
+    service = type("Service", (), {"settings": settings})()
+    fake_service = FakeWorkerService(
+        stream_updates=[{"phase": "answer_html", "html": "<div>共找到 2 条相关内容</div><p>答案正文</p>"}],
+        response=_make_ask_response(
+            "hello",
+            answer_text="共找到 2 条相关内容\n\n答案正文",
+            answer_html="<div>共找到 2 条相关内容</div><p>答案正文</p><blockquote>引用说明</blockquote>",
+        ),
+    )
+    worker = type("Worker", (), {"worker_id": "worker-01", "service": fake_service})()
+    client = TestClient(create_chat_ui_app(service=service, pool_manager=FakePoolManager(worker=worker)))
+
+    with client.stream("POST", "/api/ask-stream", json={"question": "hello"}) as response:
+        events = [json.loads(line) for line in response.iter_lines() if line]
+
+    assert response.status_code == 200
+    assert events[-1]["type"] == "done"
+    assert events[1]["type"] == "answer_html"
+    assert "共找到 2 条相关内容" not in events[1]["html"]
+    assert events[-1]["response"]["answer_text"] == "答案正文"
+    assert "共找到 2 条相关内容" not in events[-1]["response"]["answer_html"]
+    assert "<blockquote>" in events[-1]["response"]["answer_html"]
 
 
 def test_chat_ui_stream_error_after_thinking_emits_error(tmp_path, monkeypatch):

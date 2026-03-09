@@ -64,6 +64,11 @@ MODEL_OPTION_SELECTOR = "div[class*='_modelOption_']"
 MODEL_OPTION_NAME_SELECTOR = "div[class*='_name_']"
 MODEL_OPTION_DESC_SELECTOR = "div[class*='_desc_']"
 MODEL_OPTION_SELECTED_HINT = "_selected_"
+MODEL_MENU_SELECTORS = (
+    "div.t-popup__content.t-dropdown.modelDropdown",
+    "div.t-portal-wrapper div.t-popup__content.t-dropdown.modelDropdown",
+    "div[class*='modelDropdown']",
+)
 
 AI_CONTAINER_SELECTORS = (
     "div[class*='normalModeAiBubbleWrapper'] div[class*='aiContainer']",

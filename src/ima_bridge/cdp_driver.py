@@ -8,7 +8,7 @@ from playwright.sync_api import Browser, Locator, Page
 from ima_bridge.config import Settings
 from ima_bridge.errors import AskTimeoutError, ConfigMismatchError, KBNotFoundError, LoginRequiredError
 from ima_bridge.probes import APP_COMPOSER_SELECTORS, CONTENT_PREFIX, LOGIN_HINTS, LOADING_HINTS
-from ima_bridge.utils import incremental_text, timestamp_slug
+from ima_bridge.utils import extract_reference_lines, incremental_text, timestamp_slug
 
 EXTENSION_PATTERN = re.compile(r"^chrome-extension://([a-z]{32})(?:/.*)?$")
 
@@ -33,7 +33,7 @@ class CdpAskDriver:
             answer_text = after_text.strip()
 
         answer_html = after_html if after_html != before_html else ""
-        references = self._extract_references(answer_text)
+        references = extract_reference_lines(answer_text)
         screenshot = self._capture(page) if self.settings.capture_screenshot else None
         return answer_text, answer_html, references, screenshot
 
@@ -155,16 +155,6 @@ class CdpAskDriver:
 
     def _has_loading_state(self, text: str) -> bool:
         return any(hint in text for hint in LOADING_HINTS)
-
-    def _extract_references(self, answer_text: str) -> list[str]:
-        references = []
-        for line in answer_text.splitlines():
-            line_text = line.strip()
-            if not line_text:
-                continue
-            if line_text.startswith("[") and "]" in line_text:
-                references.append(line_text)
-        return references
 
     def _capture(self, page: Page) -> str:
         filename = f"{timestamp_slug()}.png"

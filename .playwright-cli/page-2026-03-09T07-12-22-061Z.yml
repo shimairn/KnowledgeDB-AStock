@@ -1,0 +1,18 @@
+- generic [ref=e2]:
+  - generic [ref=e3]:
+    - generic [ref=e6]:
+      - heading "嗯… 无法访问此页面" [level=1] [ref=e7]
+      - paragraph [ref=e8]:
+        - strong [ref=e9]: 127.0.0.1
+        - text: 拒绝连接。
+      - generic [ref=e10]:
+        - paragraph [ref=e11]: 请尝试：
+        - list [ref=e12]:
+          - listitem [ref=e13]: •检查连接
+          - listitem [ref=e14]:
+            - text: •
+            - link "检查代理和防火墙" [ref=e15] [cursor=pointer]:
+              - /url: "#buttons"
+      - generic [ref=e16]: ERR_CONNECTION_REFUSED
+    - button "刷新" [ref=e19] [cursor=pointer]
+  - generic [ref=e23]: Microsoft Edge

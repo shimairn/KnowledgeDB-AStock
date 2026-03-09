@@ -39,7 +39,17 @@ def incremental_text(before: str, after: str, question: str) -> str:
     return delta.strip()
 
 
+def extract_reference_lines(answer_text: str) -> list[str]:
+    references: list[str] = []
+    for line in str(answer_text or "").splitlines():
+        line_text = line.strip()
+        if not line_text:
+            continue
+        if line_text.startswith("[") and "]" in line_text:
+            references.append(line_text)
+    return references
+
+
 def get_logger(name: str) -> logging.Logger:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     return logging.getLogger(name)
-

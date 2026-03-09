@@ -89,9 +89,15 @@ class WorkerPoolManager:
 
     def refresh_worker(self, worker: WorkerSlot) -> WorkerStatus:
         health = worker.service.health()
-        worker.status = self._status_from_health(health)
+        next_status = self._status_from_health(health)
+        cached_catalog = self._load_model_catalog(worker) if next_status == "ready" else None
+
+        worker.status = next_status
         worker.last_error_code = health.error_code
         worker.last_error_message = health.error_message
+        if cached_catalog is not None:
+            with self._lock:
+                self._cached_model_catalog = cached_catalog
         return worker.status
 
     def try_acquire(self) -> WorkerSlot | None:
@@ -179,19 +185,16 @@ class WorkerPoolManager:
         return seeded
 
     def get_model_catalog(self) -> DriverModelCatalog:
-        worker = self.try_acquire()
-        if worker is None:
-            return self._cached_model_catalog
+        return self._cached_model_catalog
 
+    def _load_model_catalog(self, worker: WorkerSlot) -> DriverModelCatalog | None:
         try:
             catalog = worker.service.get_model_catalog()
-            if catalog.options or catalog.current_model:
-                self._cached_model_catalog = catalog
-            return catalog
         except Exception:
-            return self._cached_model_catalog
-        finally:
-            self.release(worker)
+            return None
+        if catalog.options or catalog.current_model:
+            return catalog
+        return None
 
     def _fallback_model_catalog(self) -> DriverModelCatalog:
         label = self.template_settings.model_prefix.strip()

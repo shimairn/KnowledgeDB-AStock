@@ -7,95 +7,69 @@
   <link rel="stylesheet" href="/assets/app.css" />
 </head>
 <body>
-  <div class="app-shell">
+  <div id="appShell" class="app-shell">
     <header class="app-header">
-      <div class="app-header-inner">
-        <div class="status-badge" role="status" aria-live="polite" aria-atomic="true">
-          <span id="statusDot" class="dot"></span>
-          <span id="statusText">初始化中...</span>
+      <div class="app-header__identity">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <div class="app-header__copy">
+          <span class="app-header__eyebrow">ima</span>
+          <h1 id="kbLabel" class="app-header__title">正在连接知识库</h1>
         </div>
+      </div>
 
-        <div class="header-right">
-          <div id="modelField" class="model-field" hidden>
-            <label class="sr-only" for="modelSelect">模型</label>
-            <div class="model-select-wrap">
-              <select id="modelSelect" class="model-select"></select>
-            </div>
-          </div>
-
-          <label class="toggle-chip" for="thinkingToggle">
-            <input id="thinkingToggle" type="checkbox" checked />
-            <span>显示思考</span>
-          </label>
-
-          <button id="clearBtn" type="button">新建对话</button>
-        </div>
+      <div id="statusWrap" class="status status--ready" role="status" aria-live="polite" aria-atomic="true">
+        <span id="statusDot" class="status-dot status-dot--ready"></span>
+        <span id="statusText">初始化中...</span>
       </div>
     </header>
 
-    <main class="chat-stage">
-      <section class="chat-column" aria-label="问答区域">
+    <main class="workspace-main">
+      <div id="conversationViewport" class="conversation-viewport">
+        <section id="emptyState" class="empty-state" aria-live="polite">
+          <div class="empty-state__mark" aria-hidden="true"></div>
+          <h2 class="empty-state__title">开始提问</h2>
+          <p id="heroDescription" class="empty-state__text">围绕当前知识库直接提问，回答会以富文本连续呈现。</p>
+        </section>
+
         <div id="chat" class="chat-log" role="log" aria-live="polite"></div>
-      </section>
-    </main>
-
-    <form id="composer" class="composer">
-      <div class="composer-card">
-        <label class="sr-only" for="question">输入问题</label>
-        <textarea
-          id="question"
-          rows="1"
-          placeholder="输入问题，Enter 发送，Shift+Enter 换行"
-          aria-describedby="questionHint questionMeta"
-        ></textarea>
-
-        <div class="composer-footer">
-          <div class="composer-meta">
-            <span id="questionHint" class="hint">每次提问都会自动开启新对话，页面空闲后会自动清理。</span>
-            <span id="questionMeta" class="meta">0 字</span>
-          </div>
-          <button id="sendBtn" class="primary" type="submit">发送</button>
-        </div>
       </div>
-    </form>
+
+      <button id="jumpToLatestBtn" class="jump-to-latest" type="button" hidden>回到底部</button>
+
+      <form id="composer" class="composer">
+        <div class="composer-shell">
+          <div class="composer-frame">
+            <label class="sr-only" for="question">输入问题</label>
+            <textarea
+              id="question"
+              class="composer-input"
+              rows="1"
+              placeholder="有问题尽管问"
+            ></textarea>
+
+            <div class="composer-controls">
+              <div class="composer-actions">
+                <div id="modelMenu" class="model-menu" hidden>
+                  <button id="modelMenuTrigger" class="model-menu__trigger" type="button" aria-haspopup="listbox" aria-expanded="false">
+                    <span id="modelMenuLabel">选择模型</span>
+                    <span class="model-menu__caret" aria-hidden="true">▾</span>
+                  </button>
+                  <div id="modelMenuList" class="model-menu__list" role="listbox" hidden></div>
+                </div>
+
+                <button id="newConversationBtn" class="secondary-button" type="button" hidden>新建对话</button>
+              </div>
+
+              <button id="sendBtn" class="send-button" type="submit" aria-label="发送">
+                <span aria-hidden="true">↑</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </form>
+    </main>
   </div>
 
-  <div id="drawerBackdrop" class="drawer-backdrop" hidden></div>
-
-  <aside
-    id="sourceDrawer"
-    class="source-drawer"
-    aria-hidden="true"
-    aria-labelledby="sourceDrawerTitle"
-    hidden
-  >
-    <div class="source-drawer-header">
-      <div>
-        <p class="drawer-kicker">Original Source</p>
-        <h2 id="sourceDrawerTitle">原文预览</h2>
-        <p id="sourceDrawerMeta" class="drawer-meta">选择一条来源后，可在这里预览并跳转到原文。</p>
-      </div>
-      <button id="drawerCloseBtn" class="drawer-close" type="button" aria-label="关闭原文预览">关闭</button>
-    </div>
-
-    <div class="source-drawer-toolbar">
-      <a
-        id="sourceDrawerOpenLink"
-        class="source-link source-link--primary is-disabled"
-        href="about:blank"
-        target="_blank"
-        rel="noreferrer"
-        aria-disabled="true"
-        tabindex="-1"
-      >打开原文</a>
-      <span id="sourceDrawerStatus" class="drawer-status">部分站点可能禁止嵌入预览；如果未显示，可直接打开原文。</span>
-    </div>
-
-    <div class="source-drawer-frame-wrap">
-      <iframe id="sourceDrawerFrame" class="source-drawer-frame" title="原文侧边预览" loading="lazy" referrerpolicy="no-referrer"></iframe>
-    </div>
-  </aside>
-
-  <script src="/assets/app.js"></script>
+  <script type="module" src="/assets/app.js"></script>
 </body>
 </html>

@@ -11,6 +11,7 @@ from ima_bridge.probes import CONTENT_PREFIX, INPUT_HINT, KB_NAV_TEXTS, LOGIN_HI
 from ima_bridge.target_state import TargetStateStore
 
 from .session import WebSession
+from .interactions import click_locator_candidates, click_with_fallback
 
 _CANONICAL_TEXT_RE = re.compile(r"[^0-9a-zA-Z\u4e00-\u9fff]+")
 
@@ -42,7 +43,7 @@ class WebKnowledgeBaseNavigator:
 
         for nav in KB_NAV_TEXTS:
             nav_locator = page.get_by_text(nav, exact=False)
-            if self.click_locator_candidates(page, nav_locator):
+            if click_locator_candidates(page, nav_locator):
                 page.wait_for_timeout(700)
                 self.ensure_login(page)
                 if self.confirm_target_context(page):
@@ -135,18 +136,6 @@ class WebKnowledgeBaseNavigator:
         self.remember_target_url(target_page, target_text)
         return True
 
-    def click_locator_candidates(self, page: Page, locator: Locator, max_candidates: int = 8) -> bool:
-        try:
-            count = locator.count()
-        except Exception:
-            return False
-
-        for index in range(min(count, max_candidates)):
-            candidate = locator.nth(index)
-            if self.click_with_fallback(page, candidate):
-                return True
-        return False
-
     def click_target_entry_candidates(self, page: Page, locator: Locator, max_candidates: int = 8) -> bool:
         try:
             count = locator.count()
@@ -156,39 +145,10 @@ class WebKnowledgeBaseNavigator:
         for index in range(min(count, max_candidates)):
             candidate = locator.nth(index)
             card = candidate.locator("xpath=ancestor::div[contains(@class, 'knowledgeListItem')][1]").first
-            if self.click_with_fallback(page, card):
+            if click_with_fallback(page, card):
                 return True
-            if self.click_with_fallback(page, candidate):
+            if click_with_fallback(page, candidate):
                 return True
-        return False
-
-    def click_with_fallback(self, page: Page, locator: Locator) -> bool:
-        try:
-            if not locator.is_visible():
-                return False
-        except Exception:
-            pass
-
-        attempts = (
-            lambda: locator.click(timeout=1800),
-            lambda: (locator.scroll_into_view_if_needed(timeout=1800), locator.click(timeout=1800)),
-            lambda: locator.click(timeout=1800, force=True),
-            lambda: locator.evaluate("(element) => element.click()"),
-        )
-        for attempt in attempts:
-            try:
-                attempt()
-                return True
-            except Exception:
-                continue
-
-        try:
-            box = locator.bounding_box()
-            if box is not None:
-                page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
-                return True
-        except Exception:
-            pass
         return False
 
     def try_open_remembered_target(self, page: Page) -> bool:

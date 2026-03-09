@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from ima_bridge.config import get_settings
+from ima_bridge.driver_protocol import DriverModelCatalog, DriverModelOption
 from ima_bridge.schemas import AskResponse, HealthResponse, KnowledgeBaseIdentity
 from ima_bridge.worker_pool import WorkerPoolManager
 
@@ -46,9 +47,21 @@ class FakeService:
     def __init__(self, settings) -> None:
         self.settings = settings
         self.health_response = _make_health(settings.instance, ok=True)
+        self.model_catalog = DriverModelCatalog(
+            current_model="DeepSeek V3.2 Think",
+            options=[
+                DriverModelOption(value="DeepSeek V3.2 Think", label="DeepSeek V3.2 Think", selected=True),
+                DriverModelOption(value="DeepSeek V3.2", label="DeepSeek V3.2", selected=False),
+            ],
+        )
+        self.model_catalog_calls = 0
 
     def health(self) -> HealthResponse:
         return self.health_response
+
+    def get_model_catalog(self) -> DriverModelCatalog:
+        self.model_catalog_calls += 1
+        return self.model_catalog
 
 
 def test_worker_pool_acquire_release_and_busy(tmp_path, monkeypatch):
@@ -159,3 +172,29 @@ def test_worker_pool_seeds_profiles_from_template(tmp_path, monkeypatch):
         assert copied.exists()
         assert copied.read_text(encoding="utf-8") == '{"auth": true}'
         assert worker.settings.target_url_state_path.read_text(encoding="utf-8") == "https://ima.qq.com/wiki/123"
+
+
+def test_worker_pool_caches_model_catalog_during_refresh(tmp_path, monkeypatch):
+    _configure_env(tmp_path, monkeypatch)
+    services = {}
+
+    def service_factory(settings):
+        service = FakeService(settings)
+        services[settings.instance] = service
+        return service
+
+    template_settings = get_settings(instance="template", driver_mode="web")
+    manager = WorkerPoolManager(template_settings=template_settings, worker_count=1, service_factory=service_factory)
+
+    manager.refresh_all()
+
+    worker = manager.workers[0]
+    cached = manager.get_model_catalog()
+
+    assert worker.status == "ready"
+    assert cached.current_model == "DeepSeek V3.2 Think"
+    assert len(cached.options) == 2
+    assert services[worker.settings.instance].model_catalog_calls == 1
+
+    worker_after = manager.try_acquire()
+    assert worker_after is worker

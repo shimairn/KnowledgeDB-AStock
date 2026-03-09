@@ -12,6 +12,7 @@ from ima_bridge.probes import (
     COMPOSER_SELECTORS,
     LOADING_HINTS,
     MODEL_OPTION_DESC_SELECTOR,
+    MODEL_MENU_SELECTORS,
     MODEL_OPTION_NAME_SELECTOR,
     MODEL_OPTION_SELECTED_HINT,
     MODEL_OPTION_SELECTOR,
@@ -20,8 +21,11 @@ from ima_bridge.probes import (
     SEND_CONTROL_SELECTORS,
 )
 
-from .answer_extractor import WebAnswerExtractor
+from .answer_extractor import ExtractedAIContent, WebAnswerExtractor
+from .interactions import click_locator_candidates, click_with_fallback
 from .session import WebSession
+
+HISTORY_HEADER_LABEL = "\u95ee\u7b54\u5386\u53f2"
 
 
 def normalize_model_text(text: str) -> str:
@@ -94,35 +98,35 @@ class WebConversationRunner:
         if trigger is None:
             return self._fallback_catalog(current_model or preferred_model or "")
 
-        if not self._click_with_fallback(page, trigger):
+        if not click_with_fallback(page, trigger):
             return self._fallback_catalog(current_model or preferred_model or "")
 
-        page.wait_for_timeout(160)
+        self._wait_for_model_menu_state(page, open_state=True, timeout_ms=600)
         options = self._collect_model_options(page)
         if not options:
-            self._close_model_menu(page)
+            self._ensure_model_menu_closed(page)
             return self._fallback_catalog(current_model or preferred_model or "")
 
         selected_option = match_model_option(current_model, options)
         desired_option = match_model_option(preferred_model, options) if preferred_model else None
 
         if preferred_model and desired_option is None and strict:
-            self._close_model_menu(page)
+            self._ensure_model_menu_closed(page)
             raise ConfigMismatchError(f"Requested model not available: {preferred_model}")
 
         if desired_option is not None and (selected_option is None or desired_option.value != selected_option.value):
             option_locator = self._find_model_option_locator(page, desired_option)
-            if option_locator is None or not self._click_with_fallback(page, option_locator):
-                self._close_model_menu(page)
+            if option_locator is None or not click_with_fallback(page, option_locator):
+                self._ensure_model_menu_closed(page)
                 if strict:
                     raise ConfigMismatchError(f"Requested model not available: {preferred_model}")
             else:
-                page.wait_for_timeout(220)
+                self._ensure_model_menu_closed(page)
                 selected_option = desired_option
                 current_model = desired_option.label
                 options = self._mark_selected_option(options, desired_option)
 
-        self._close_model_menu(page)
+        self._ensure_model_menu_closed(page)
 
         if not current_model:
             selected_option = selected_option or next((option for option in options if option.selected), None)
@@ -141,7 +145,7 @@ class WebConversationRunner:
         if action is None:
             return False
 
-        if not self._click_with_fallback(page, action):
+        if not click_with_fallback(page, action):
             return False
 
         page.wait_for_timeout(420)
@@ -178,16 +182,20 @@ class WebConversationRunner:
         if not question.strip():
             raise AskTimeoutError("Question must not be empty")
 
+        self._ensure_model_menu_closed(page)
         composer = self.find_composer(page)
         if composer is None:
             raise AskTimeoutError("Input composer not found")
 
-        composer.click(timeout=1500)
+        if not click_with_fallback(page, composer):
+            raise AskTimeoutError("Input composer not clickable")
         try:
             composer.fill("")
             composer.fill(question)
         except Exception:
-            composer.click()
+            self._ensure_model_menu_closed(page)
+            if not click_with_fallback(page, composer):
+                raise AskTimeoutError("Input composer not clickable")
             page.keyboard.press("Control+A")
             page.keyboard.press("Backspace")
             page.keyboard.type(question)
@@ -204,7 +212,7 @@ class WebConversationRunner:
     def click_send_control(self, page: Page) -> bool:
         for selector in SEND_CONTROL_SELECTORS:
             locator = page.locator(selector)
-            if self._click_locator_candidates(page, locator, max_candidates=3):
+            if click_locator_candidates(page, locator, max_candidates=3):
                 return True
         return False
 
@@ -229,12 +237,12 @@ class WebConversationRunner:
             for index in range(count):
                 candidate = locator.nth(index)
                 try:
-                    if candidate.is_visible() and "闂瓟鍘嗗彶" in self._safe_locator_text(candidate):
+                    if candidate.is_visible() and HISTORY_HEADER_LABEL in self._safe_locator_text(candidate):
                         return candidate
                 except Exception:
                     continue
 
-        locator = page.get_by_text("闂瓟鍘嗗彶", exact=False)
+        locator = page.get_by_text(HISTORY_HEADER_LABEL, exact=False)
         try:
             if locator.count() == 0:
                 return None
@@ -278,16 +286,21 @@ class WebConversationRunner:
         deadline = time.monotonic() + self.settings.ask_timeout_seconds
         stable_rounds = 0
         previous_signature = self.text_signature(before_text)
+        content_stable_rounds = 0
+        previous_content_signature = self.content_signature(ExtractedAIContent())
         changed = False
         latest_text = before_text
         latest_html = self.session.body_html(page)
-        latest_answer_text = ""
+        latest_answer_html = ""
         latest_thinking_text = ""
+        latest_content = ExtractedAIContent()
 
         while time.monotonic() < deadline:
             latest_text = self.session.body_text(page)
             latest_html = self.session.body_html(page)
+            latest_content = self.extractor.extract_latest_ai_content(page) or ExtractedAIContent()
             current_signature = self.text_signature(latest_text)
+            current_content_signature = self.content_signature(latest_content)
 
             if current_signature == previous_signature:
                 stable_rounds += 1
@@ -295,26 +308,24 @@ class WebConversationRunner:
                 stable_rounds = 0
             previous_signature = current_signature
 
-            if latest_text != before_text:
+            if current_content_signature == previous_content_signature:
+                content_stable_rounds += 1
+            else:
+                content_stable_rounds = 0
+            previous_content_signature = current_content_signature
+
+            if latest_text != before_text or self.has_answer_content(latest_content):
                 changed = True
 
             if on_update is not None:
-                content = self.extractor.extract_latest_ai_content(page)
-                answer_text = "" if content is None else content.answer_text
-                thinking_text = "" if content is None else content.thinking_text
-
-                if not answer_text:
-                    answer_text = self.extractor.extract_answer_text(before_text, latest_text, question)
-
-                latest_answer_text = self._emit_update(
-                    phase="answer",
-                    current_text=answer_text,
-                    previous_text=latest_answer_text,
+                latest_answer_html = self._emit_html_snapshot(
+                    current_html=latest_content.answer_html,
+                    previous_html=latest_answer_html,
                     on_update=on_update,
                 )
                 latest_thinking_text = self._emit_update(
                     phase="thinking",
-                    current_text=thinking_text,
+                    current_text=latest_content.thinking_text,
                     previous_text=latest_thinking_text,
                     on_update=on_update,
                 )
@@ -322,7 +333,13 @@ class WebConversationRunner:
             if changed and latest_text != before_text and stable_rounds >= 2 and not self.has_loading_state(latest_text):
                 return latest_text, latest_html
 
+            if self.has_stable_answer_content(latest_content, stable_rounds=content_stable_rounds):
+                return latest_text, latest_html
+
             page.wait_for_timeout(int(self.settings.poll_interval_seconds * 1000))
+
+        if self.has_stable_answer_content(latest_content, stable_rounds=content_stable_rounds):
+            return latest_text, latest_html
 
         raise AskTimeoutError("Timed out waiting for answer completion")
 
@@ -330,8 +347,23 @@ class WebConversationRunner:
         tail_size = 512
         return len(body_text), body_text[-tail_size:]
 
+    def content_signature(self, content: ExtractedAIContent) -> tuple[str, str, str]:
+        return (
+            str(content.answer_text or "").strip(),
+            str(content.answer_html or "").strip(),
+            str(content.thinking_text or "").strip(),
+        )
+
     def has_loading_state(self, body_text: str) -> bool:
         return any(hint in body_text for hint in LOADING_HINTS)
+
+    def has_answer_content(self, content: ExtractedAIContent) -> bool:
+        return bool(str(content.answer_text or "").strip() or str(content.answer_html or "").strip())
+
+    def has_stable_answer_content(self, content: ExtractedAIContent, *, stable_rounds: int) -> bool:
+        if stable_rounds < 1 or not self.has_answer_content(content):
+            return False
+        return not self.has_loading_state(str(content.answer_text or ""))
 
     def _emit_update(
         self,
@@ -352,6 +384,18 @@ class WebConversationRunner:
         delta = str(delta or "")
         if delta:
             on_update(phase, delta, normalized)
+        return normalized
+
+    def _emit_html_snapshot(
+        self,
+        current_html: str,
+        previous_html: str,
+        on_update: Callable[..., None],
+    ) -> str:
+        normalized = str(current_html or "").strip()
+        if not normalized or normalized == previous_html:
+            return previous_html
+        on_update({"phase": "answer_html", "html": normalized})
         return normalized
 
     def _collect_model_options(self, page: Page) -> list[DriverModelOption]:
@@ -445,9 +489,49 @@ class WebConversationRunner:
     def _close_model_menu(self, page: Page) -> None:
         try:
             page.keyboard.press("Escape")
-            page.wait_for_timeout(80)
         except Exception:
             pass
+
+    def _ensure_model_menu_closed(self, page: Page, timeout_ms: int = 1500) -> bool:
+        if self._wait_for_model_menu_state(page, open_state=False, timeout_ms=120):
+            return True
+
+        self._close_model_menu(page)
+        if self._wait_for_model_menu_state(page, open_state=False, timeout_ms=timeout_ms):
+            return True
+
+        try:
+            page.mouse.click(8, 8)
+        except Exception:
+            pass
+        page.wait_for_timeout(80)
+        self._close_model_menu(page)
+        return self._wait_for_model_menu_state(page, open_state=False, timeout_ms=timeout_ms)
+
+    def _wait_for_model_menu_state(self, page: Page, open_state: bool, timeout_ms: int = 1000) -> bool:
+        deadline = time.monotonic() + (timeout_ms / 1000)
+        while time.monotonic() < deadline:
+            if self._is_model_menu_open(page) == open_state:
+                return True
+            page.wait_for_timeout(50)
+        return self._is_model_menu_open(page) == open_state
+
+    def _is_model_menu_open(self, page: Page) -> bool:
+        for selector in MODEL_MENU_SELECTORS:
+            locator = page.locator(selector)
+            try:
+                count = locator.count()
+            except Exception:
+                continue
+
+            for index in range(count):
+                candidate = locator.nth(index)
+                try:
+                    if candidate.is_visible():
+                        return True
+                except Exception:
+                    continue
+        return False
 
     def _first_visible_locator_text(self, locator: Locator) -> str:
         try:
@@ -496,44 +580,3 @@ class WebConversationRunner:
             except Exception:
                 continue
         return None
-
-    def _click_locator_candidates(self, page: Page, locator: Locator, max_candidates: int = 8) -> bool:
-        try:
-            count = locator.count()
-        except Exception:
-            return False
-
-        for index in range(min(count, max_candidates)):
-            candidate = locator.nth(index)
-            if self._click_with_fallback(page, candidate):
-                return True
-        return False
-
-    def _click_with_fallback(self, page: Page, locator: Locator) -> bool:
-        try:
-            if not locator.is_visible():
-                return False
-        except Exception:
-            pass
-
-        attempts = (
-            lambda: locator.click(timeout=1800),
-            lambda: (locator.scroll_into_view_if_needed(timeout=1800), locator.click(timeout=1800)),
-            lambda: locator.click(timeout=1800, force=True),
-            lambda: locator.evaluate("(element) => element.click()"),
-        )
-        for attempt in attempts:
-            try:
-                attempt()
-                return True
-            except Exception:
-                continue
-
-        try:
-            box = locator.bounding_box()
-            if box is not None:
-                page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
-                return True
-        except Exception:
-            pass
-        return False

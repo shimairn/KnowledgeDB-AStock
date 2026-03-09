@@ -7,17 +7,31 @@ from playwright.sync_api import Locator, Page
 
 from ima_bridge.config import Settings
 from ima_bridge.probes import AI_BUBBLE_SELECTOR, AI_CONTAINER_SELECTORS
-from ima_bridge.utils import incremental_text, timestamp_slug
+from ima_bridge.ui_answer_cleaner import clean_answer_html
+from ima_bridge.utils import extract_reference_lines, incremental_text, timestamp_slug
 
 from .session import WebSession
 
-THINKING_LABELS = ("思考过程", "思考中", "推理过程", "深度思考", "Thinking", "Reasoning")
-THINKING_LABEL_RE = re.compile(r"^(?:思考过程|思考中|推理过程|深度思考|Thinking|Reasoning)\s*[:：-]?\s*", re.IGNORECASE)
-ANSWER_LABEL_RE = re.compile(r"^(?:最终回答|回答|答复|Final Answer|Answer)\s*[:：-]\s*", re.IGNORECASE)
+THINKING_LABELS = (
+    "思考过程",
+    "思考中",
+    "推理过程",
+    "深度思考",
+    "Thinking",
+    "Reasoning",
+)
+THINKING_LABEL_RE = re.compile(
+    r"^(?:思考过程|思考中|推理过程|深度思考|Thinking|Reasoning)\s*[:：]?\s*",
+    re.IGNORECASE,
+)
+ANSWER_LABEL_RE = re.compile(
+    r"^(?:最终回答|回答|答复|Final Answer|Answer)(?=\s*[:：-]|\s*$)\s*[:：-]?\s*",
+    re.IGNORECASE,
+)
 THINKING_TAG_RE = re.compile(r"<think>\s*(.*?)\s*</think>\s*(.*)", re.IGNORECASE | re.DOTALL)
 THINKING_SPLIT_RE = re.compile(
-    r"(?:思考过程|推理过程|深度思考|thinking|reasoning)\s*[:：-]?\s*(.+?)"
-    r"(?:最终回答|回答|答复|final answer|answer)\s*[:：-]?\s*(.+)",
+    r"(?:思考过程|推理过程|深度思考|thinking|reasoning)\s*[:：]?\s*(.+?)"
+    r"(?:最终回答|回答|答复|final answer|answer)\s*[:：]?\s*(.+)",
     re.IGNORECASE | re.DOTALL,
 )
 KB_EMPTY_ANSWER_HINTS = (
@@ -69,18 +83,18 @@ class WebAnswerExtractor:
         return normalized
 
     def _normalize_answer_candidate(self, candidate: str) -> str:
-        candidate = candidate.lstrip(" \n\r\t:锛?")
-        if candidate.startswith("ima"):
-            candidate = candidate[3:].lstrip(" \n\r\t:锛?")
+        cleaned = str(candidate or "").lstrip(" \n\r\t:：")
+        if cleaned.lower().startswith("ima"):
+            cleaned = cleaned[3:].lstrip(" \n\r\t:：")
 
-        for marker in (f"\n\n\n\n\n{self.settings.mode_name}", "\n闂瓟鍘嗗彶\n"):
-            marker_index = candidate.find(marker)
+        for marker in (f"\n\n\n\n\n{self.settings.mode_name}", "\n问答历史\n"):
+            marker_index = cleaned.find(marker)
             if marker_index != -1:
-                candidate = candidate[:marker_index]
+                cleaned = cleaned[:marker_index]
                 break
 
-        candidate = ANSWER_LABEL_RE.sub("", candidate, count=1)
-        return candidate.strip()
+        cleaned = ANSWER_LABEL_RE.sub("", cleaned, count=1)
+        return cleaned.strip()
 
     def extract_latest_ai_block(self, page: Page) -> tuple[str, str, str] | None:
         content = self.extract_latest_ai_content(page)
@@ -105,7 +119,9 @@ class WebAnswerExtractor:
         try:
             raw_text = node.inner_text(timeout=1500).strip()
             container_text = container.inner_text(timeout=1500).strip()
-            raw_html = self.compose_answer_html(page, container)
+            raw_html = self.compose_answer_html(page, node)
+            if not raw_html:
+                raw_html = self.compose_answer_html(page, container)
         except Exception:
             return None
 
@@ -144,7 +160,7 @@ class WebAnswerExtractor:
 
         return ExtractedAIContent(
             answer_text=answer_candidate,
-            answer_html=raw_html,
+            answer_html=clean_answer_html(raw_html),
             thinking_text=thinking_text,
         )
 
@@ -166,12 +182,16 @@ class WebAnswerExtractor:
                 except Exception:
                     continue
 
-                bubble = container.locator(AI_BUBBLE_SELECTOR).first
-                try:
-                    node = bubble if bubble.count() > 0 else container
-                except Exception:
-                    node = container
-                return container, node
+                bubble = self._first_visible_locator(container.locator(AI_BUBBLE_SELECTOR))
+                if bubble is not None and self._locator_has_renderable_content(bubble):
+                    return container, bubble
+
+                message = self._first_visible_locator(container.locator("div[class*='_message_']"))
+                if message is not None and self._safe_locator_text(message):
+                    return container, container
+
+                if bubble is not None and self._safe_locator_text(bubble):
+                    return container, bubble
         return None
 
     def extract_dom_segments(self, container: Locator) -> ExtractedAIContent:
@@ -181,7 +201,7 @@ class WebAnswerExtractor:
             .replace(/\u00a0/g, ' ')
             .replace(/\s+/g, ' ')
             .trim();
-          const labelRe = /(思考过程|思考中|推理过程|深度思考|thinking|reasoning)/i;
+          const labelRe = /(?:\u601d\u8003\u8fc7\u7a0b|\u601d\u8003\u4e2d|\u63a8\u7406\u8fc7\u7a0b|\u6df1\u5ea6\u601d\u8003|thinking|reasoning)/i;
           const attrRe = /(think|reason|analysis|thought)/i;
           const clone = element.cloneNode(true);
           const candidates = [];
@@ -279,64 +299,57 @@ class WebAnswerExtractor:
         return source.strip()
 
     def compose_answer_html(self, page: Page, node: Locator) -> str:
+        _ = page
         try:
             payload = node.evaluate(
-                """
+                r"""
                 (element) => {
                   const clone = element.cloneNode(true);
+                  const root =
+                    (clone.matches && clone.matches("div[class*='_markdown_']") ? clone : null) ||
+                    clone.querySelector("div[class*='_markdown_']");
+                  if (!root) {
+                    return { html: "" };
+                  }
+
                   const removeSelectors = [
-                    "div[id^='section-anchor-']",
-                    "div[class*='_bottom_']",
-                    "div[class*='_divider_']",
-                    ".t-popup",
-                    ".t-trigger",
-                    "[data-popup]",
-                    "button",
                     "script",
                     "style",
                     "noscript",
                     "iframe",
-                    "[role='button']:not([id^='@context-ref'])",
+                    "form",
+                    "input",
+                    "textarea",
+                    "button",
+                    "select",
+                    "option",
+                    "canvas",
+                    "svg",
+                    "header",
+                    "footer",
+                    "nav",
+                    "aside",
+                    "[id^='section-anchor-']",
+                    "[id^='@context-ref']",
+                    "[data-exposure-id*='inline-search']",
+                    "[class*='ContextInlineIndex']",
+                    "[class*='_indexComponent_']",
+                    "[class*='_indexWrapper_']",
+                    "[class*='_bottom_']",
+                    "[class*='_divider_']",
+                    "[role='button']",
                   ];
 
                   for (const selector of removeSelectors) {
-                    for (const item of Array.from(clone.querySelectorAll(selector))) {
+                    for (const item of Array.from(root.querySelectorAll(selector))) {
                       item.remove();
                     }
                   }
 
-                  for (const item of Array.from(clone.querySelectorAll('*'))) {
-                    for (const attr of Array.from(item.attributes)) {
-                      const name = attr.name.toLowerCase();
-                      if (name.startsWith('on')) {
-                        item.removeAttribute(attr.name);
-                      }
-                    }
-
-                    if (item.hasAttribute('src')) {
-                      try {
-                        item.setAttribute('src', new URL(item.getAttribute('src'), document.baseURI).href);
-                      } catch (_) {
-                      }
-                    }
-
-                    if (item.hasAttribute('href')) {
-                      try {
-                        item.setAttribute('href', new URL(item.getAttribute('href'), document.baseURI).href);
-                      } catch (_) {
-                      }
-                    }
-                  }
-
-                  const wrapper = document.createElement('div');
-                  wrapper.appendChild(clone);
-                  return {
-                    html: wrapper.innerHTML.trim(),
-                    baseUrl: document.baseURI,
-                  };
+                  return { html: root.outerHTML.trim() };
                 }
                 """,
-                timeout=1500,
+                timeout=3000,
             )
         except Exception:
             return ""
@@ -344,131 +357,54 @@ class WebAnswerExtractor:
         content_html = str(payload.get("html", "")).strip()
         if not content_html:
             return ""
+        return clean_answer_html(content_html)
 
-        base_url = str(payload.get("baseUrl", page.url or self.settings.web_base_url)).strip() or self.settings.web_base_url
-        class_names = self.extract_class_names(content_html)
-        stylesheet_links = self.collect_stylesheet_links(page)
-        styles_text = self.collect_page_styles(page, class_names)
-        head_parts = [
-            '<meta charset="utf-8" />',
-            f'<base href="{base_url}" />',
-        ]
-        for href in stylesheet_links:
-            head_parts.append(f'<link rel="stylesheet" href="{href}" />')
-        head_parts.append(
-            "<style>"
-            "html,body{margin:0;padding:0;background:#fff;color:#1e2a45;}"
-            "body{font:14px/1.6 \"Segoe UI\",\"PingFang SC\",\"Microsoft YaHei\",sans-serif;}"
-            "img,svg,canvas,video{max-width:100%;height:auto;}"
-            "table{max-width:100%;}"
-            "pre{white-space:pre-wrap;word-break:break-word;}"
-            "a{color:inherit;}"
-            "</style>"
-        )
-        if styles_text:
-            head_parts.append(f"<style>{styles_text}</style>")
-        return f"<!doctype html><html><head>{''.join(head_parts)}</head><body>{content_html}</body></html>"
-
-    def collect_stylesheet_links(self, page: Page) -> list[str]:
-        script = """
-        () => Array.from(document.querySelectorAll('link[rel="stylesheet"]'))
-          .map((item) => item.href || '')
-          .map((item) => item.trim())
-          .filter(Boolean)
-        """
+    def _first_visible_locator(self, locator: Locator) -> Locator | None:
         try:
-            values = page.evaluate(script)
+            count = locator.count()
         except Exception:
-            return []
+            return None
 
-        seen: set[str] = set()
-        results: list[str] = []
-        for value in values:
-            href = str(value).strip()
-            if not href or href in seen:
+        for index in range(count):
+            candidate = locator.nth(index)
+            try:
+                if candidate.is_visible():
+                    return candidate
+            except Exception:
                 continue
-            seen.add(href)
-            results.append(href)
-        return results
+        return None
 
-    def extract_class_names(self, html: str) -> list[str]:
-        class_names: set[str] = set()
-        for match in re.finditer(r'class=["\']([^"\']+)["\']', html):
-            value = match.group(1).strip()
-            if not value:
-                continue
-            for name in value.split():
-                cleaned = name.strip()
-                if cleaned:
-                    class_names.add(cleaned)
-        return sorted(class_names)
-
-    def collect_page_styles(self, page: Page, class_names: list[str]) -> str:
-        script = """
-        (classNames) => {
-          const chunks = [];
-          const seen = new Set();
-          const targetSelectors = new Set((classNames || []).map((name) => `.${name}`));
-          const hasTargets = targetSelectors.size > 0;
-          const matchSelector = (selectorText) => {
-            if (!hasTargets) return true;
-            const selector = selectorText || '';
-            for (const target of targetSelectors) {
-              if (selector.includes(target)) return true;
-            }
-            return false;
-          };
-          const push = (value) => {
-            const text = (value || '').trim();
-            if (!text || seen.has(text)) return;
-            seen.add(text);
-            chunks.push(text);
-          };
-
-          const collectRules = (rules) => {
-            const local = [];
-            for (const rule of Array.from(rules || [])) {
-              try {
-                if (rule.type === CSSRule.STYLE_RULE) {
-                  if (matchSelector(rule.selectorText || '')) {
-                    local.push(rule.cssText);
-                  }
-                  continue;
-                }
-                if (rule.type === CSSRule.MEDIA_RULE || rule.type === CSSRule.SUPPORTS_RULE) {
-                  const inner = collectRules(rule.cssRules || []);
-                  if (!inner) continue;
-                  if (rule.type === CSSRule.MEDIA_RULE) {
-                    local.push(`@media ${rule.conditionText}{${inner}}`);
-                  } else {
-                    local.push(`@supports ${rule.conditionText}{${inner}}`);
-                  }
-                  continue;
-                }
-                if (!hasTargets && rule.cssText) {
-                  local.push(rule.cssText);
-                }
-              } catch (_) {
-              }
-            }
-            return local.join('\\n');
-          };
-
-          for (const sheet of Array.from(document.styleSheets)) {
-            try {
-              if (!sheet.cssRules) continue;
-              const css = collectRules(sheet.cssRules);
-              push(css);
-            } catch (_) {
-            }
-          }
-          return chunks.join('\\n');
-        }
-        """
+    def _safe_locator_text(self, locator: Locator) -> str:
         try:
-            return page.evaluate(script, class_names)
+            return (locator.inner_text(timeout=800) or "").strip()
         except Exception:
             return ""
+
+    def _safe_locator_html(self, locator: Locator) -> str:
+        try:
+            return (locator.inner_html(timeout=800) or "").strip()
+        except Exception:
+            return ""
+
+    def _locator_has_renderable_content(self, locator: Locator) -> bool:
+        text = self.clean_ai_text(self._safe_locator_text(locator))
+        if text:
+            return True
+
+        html = self._safe_locator_html(locator).lower()
+        return any(
+            marker in html
+            for marker in (
+                "_markdown_",
+                "<p",
+                "<table",
+                "<ul",
+                "<ol",
+                "<blockquote",
+                "<pre",
+                "<img",
+            )
+        )
 
     def clean_ai_text(self, text: str) -> str:
         lines = [line.strip() for line in str(text or "").splitlines()]
@@ -500,14 +436,7 @@ class WebAnswerExtractor:
         return any(hint in normalized for hint in KB_EMPTY_ANSWER_HINTS)
 
     def extract_references(self, answer_text: str) -> list[str]:
-        references: list[str] = []
-        for line in answer_text.splitlines():
-            line_text = line.strip()
-            if not line_text:
-                continue
-            if line_text.startswith("[") and "]" in line_text:
-                references.append(line_text)
-        return references
+        return extract_reference_lines(answer_text)
 
     def capture(self, page: Page) -> str:
         filename = f"{timestamp_slug()}.png"

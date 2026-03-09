@@ -74,11 +74,11 @@ class WebAskDriver:
 
             deadline = time.monotonic() + timeout_seconds
             while time.monotonic() < deadline:
-                target_page = self.kb_navigator.find_target_page(context.pages)
+                target_page = self.kb_navigator.find_target_page(self.session.active_pages(context))
                 if target_page is not None:
                     self.kb_navigator.remember_target_url(target_page)
                     return True, None, None
-                page.wait_for_timeout(1000)
+                self.session.wait_for_page_activity(context, 1000)
             return False, "LOGIN_REQUIRED", "Login timeout. Scan QR and open target knowledge base, then retry."
         finally:
             context.close()
@@ -164,7 +164,7 @@ class WebAskDriver:
         self.kb_navigator.ensure_login(page)
         if not self.kb_navigator.try_open_remembered_target(page):
             self.kb_navigator.ensure_target_kb(page)
-        target_page = self.kb_navigator.find_target_page(context.pages)
+        target_page = self.kb_navigator.find_target_page(self.session.active_pages(context))
         if target_page is not None:
             page = target_page
         self.conversation.ensure_mode_model(page)

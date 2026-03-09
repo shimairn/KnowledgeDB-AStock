@@ -49,8 +49,11 @@ python -m ima_bridge ui --host 0.0.0.0 --ui-port 8765 --workers 10
 
 - 打开页面即可提问，无需登录
 - 前端先调用 `/api/ui-config` 与 `/api/health`
-- `/api/ask-stream` 维持 `start -> delta* -> done`
-- `answer_html` 继续通过 iframe `srcdoc` 渲染，带链接的来源可在侧边抽屉预览
+- `/api/ask-stream` 维持 `start -> thinking_delta* -> answer_html* -> done`
+- 正文始终通过 iframe `srcdoc` 渲染，不再回退到正文纯文本流
+- UI 为单主区对话布局，保留输入区模型切换与新建对话
+- 思考过程独立折叠显示，不进入正文富文本
+- 不展示知识库来源 chips、原文预览抽屉或检索命中数提示
 - worker 满载时返回 `429 BUSY`
 - 单 IP 超过限流阈值时返回 `429 RATE_LIMITED`
 

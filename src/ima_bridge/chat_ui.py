@@ -4,7 +4,9 @@ import json
 import queue
 import threading
 import webbrowser
+from dataclasses import dataclass
 from importlib.resources import files
+from pathlib import PurePosixPath
 from typing import Any, Iterator
 
 import uvicorn
@@ -13,14 +15,60 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingRes
 
 from ima_bridge.config import Settings
 from ima_bridge.service import IMAAskService
+from ima_bridge.ui_answer_cleaner import clean_answer_html, clean_answer_payload
 from ima_bridge.ui_rate_limit import UIRateLimiter
 from ima_bridge.worker_pool import WorkerPoolManager, WorkerSlot
 
 RETRY_AFTER_SECONDS = 5
+UI_ASSET_NAMES = (
+    "index.html",
+    "app.css",
+    "app.js",
+    "app-main.js",
+    "app-render.js",
+    "app-view.js",
+)
+ASSET_MEDIA_TYPES = {
+    ".css": "text/css",
+    ".js": "application/javascript",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class UIAskRequest:
+    question: str
+    model: str | None
+
+
+@dataclass(slots=True)
+class UIWorkerLease:
+    worker: WorkerSlot
+    pool_manager: WorkerPoolManager
+    rate_limiter: UIRateLimiter
+    client_ip: str
+    _released: bool = False
+
+    def release(self, *, response: Any | None = None, exc: Exception | None = None) -> None:
+        if self._released:
+            return
+        if exc is not None:
+            self.pool_manager.release(self.worker, exc=exc)
+        else:
+            self.pool_manager.release(self.worker, response=response)
+        self.rate_limiter.release(self.client_ip)
+        self._released = True
 
 
 def _load_asset(name: str) -> str:
     return files("ima_bridge.ui").joinpath(name).read_text(encoding="utf-8")
+
+
+def _load_ui_assets() -> dict[str, str]:
+    return {name: _load_asset(name) for name in UI_ASSET_NAMES}
+
+
+def _asset_media_type(asset_name: str) -> str | None:
+    return ASSET_MEDIA_TYPES.get(PurePosixPath(asset_name).suffix.lower())
 
 
 def _json_error(error_code: str, error_message: str, status_code: int, **extra: Any) -> JSONResponse:
@@ -51,15 +99,16 @@ def _rate_limited_response(retry_after_seconds: int) -> JSONResponse:
     )
 
 
-def _extract_question(payload: dict[str, Any] | None) -> str:
-    value = "" if payload is None else payload.get("question", "")
+def _extract_payload_text(payload: dict[str, Any] | None, key: str) -> str:
+    value = "" if payload is None else payload.get(key, "")
     return str(value).strip()
 
 
-def _extract_model(payload: dict[str, Any] | None) -> str | None:
-    value = "" if payload is None else payload.get("model", "")
-    normalized = str(value).strip()
-    return normalized or None
+def _parse_ui_request(payload: dict[str, Any] | None) -> UIAskRequest:
+    return UIAskRequest(
+        question=_extract_payload_text(payload, "question"),
+        model=_extract_payload_text(payload, "model") or None,
+    )
 
 
 def _kb_label(settings: Settings) -> str:
@@ -76,57 +125,109 @@ def _resolve_client_ip(request: Request, settings: Settings) -> str:
     return client or "unknown"
 
 
-def _normalize_stream_update(*args: Any, **kwargs: Any) -> tuple[str, str, str]:
+def _normalize_stream_update(*args: Any, **kwargs: Any) -> dict[str, str]:
+    payload: dict[str, Any]
     if kwargs:
-        phase = str(kwargs.get("phase") or "answer")
-        delta = str(kwargs.get("delta") or "")
-        text = str(kwargs.get("text") or "")
-        return phase, delta, text
+        payload = dict(kwargs)
+    elif len(args) == 1 and isinstance(args[0], dict):
+        payload = dict(args[0])
+    elif len(args) >= 4:
+        payload = {
+            "phase": args[0],
+            "delta": args[1],
+            "text": args[2],
+            "html": args[3],
+        }
+    elif len(args) >= 3:
+        payload = {
+            "phase": args[0],
+            "delta": args[1],
+            "text": args[2],
+        }
+    elif len(args) >= 2:
+        payload = {
+            "phase": "answer",
+            "delta": args[0],
+            "text": args[1],
+        }
+    else:
+        raise ValueError("Unsupported stream update payload")
 
-    if len(args) == 1 and isinstance(args[0], dict):
-        payload = args[0]
-        return (
-            str(payload.get("phase") or "answer"),
-            str(payload.get("delta") or ""),
-            str(payload.get("text") or ""),
-        )
-
-    if len(args) >= 3:
-        return str(args[0] or "answer"), str(args[1] or ""), str(args[2] or "")
-
-    if len(args) >= 2:
-        return "answer", str(args[0] or ""), str(args[1] or "")
-
-    raise ValueError("Unsupported stream update payload")
+    html_value = str(payload.get("html") or payload.get("answer_html") or "")
+    phase = str(payload.get("phase") or ("answer_html" if html_value else "answer"))
+    return {
+        "phase": phase,
+        "delta": str(payload.get("delta") or ""),
+        "text": str(payload.get("text") or ""),
+        "html": html_value,
+    }
 
 
-def _build_stream(
-    worker: WorkerSlot,
-    pool_manager: WorkerPoolManager,
-    rate_limiter: UIRateLimiter,
-    client_ip: str,
-    question: str,
-    model: str | None,
-) -> Iterator[str]:
+def _ui_response_payload(response: Any) -> dict[str, Any]:
+    return clean_answer_payload(response.model_dump())
+
+
+def _acquire_ui_worker(
+    request: Request,
+    payload: dict[str, Any] | None,
+    *,
+    settings: Settings,
+    pool: WorkerPoolManager,
+    limiter: UIRateLimiter,
+) -> tuple[UIAskRequest | None, UIWorkerLease | None, JSONResponse | None]:
+    request_data = _parse_ui_request(payload)
+    if not request_data.question:
+        return None, None, _json_error("ASK_TIMEOUT", "question is required", status_code=400)
+
+    client_ip = _resolve_client_ip(request, settings)
+    decision = limiter.try_acquire(client_ip)
+    if not decision.allowed:
+        return None, None, _rate_limited_response(decision.retry_after_seconds or 1)
+
+    worker = pool.try_acquire()
+    if worker is None:
+        limiter.release(client_ip)
+        return None, None, _busy_response()
+
+    return (
+        request_data,
+        UIWorkerLease(worker=worker, pool_manager=pool, rate_limiter=limiter, client_ip=client_ip),
+        None,
+    )
+
+
+def _build_stream(request_data: UIAskRequest, lease: UIWorkerLease) -> Iterator[str]:
     events: queue.Queue[dict[str, Any] | object] = queue.Queue()
     done_marker = object()
 
     def runner() -> None:
         try:
-            events.put({"type": "start", "question": question})
+            events.put({"type": "start", "question": request_data.question})
 
             def on_update(*args: Any, **kwargs: Any) -> None:
-                phase, delta, text = _normalize_stream_update(*args, **kwargs)
-                if not delta:
+                update = _normalize_stream_update(*args, **kwargs)
+                phase = update["phase"]
+                if phase == "thinking":
+                    if not update["delta"]:
+                        return
+                    events.put({"type": "thinking_delta", "delta": update["delta"], "text": update["text"]})
                     return
-                event_type = "thinking_delta" if phase == "thinking" else "delta"
-                events.put({"type": event_type, "delta": delta, "text": text})
+                if phase != "answer_html":
+                    return
+                html_snapshot = clean_answer_html(update["html"])
+                if not html_snapshot:
+                    return
+                events.put({"type": "answer_html", "html": html_snapshot})
 
-            response = worker.service.ask_with_updates(question=question, model=model, on_update=on_update)
-            pool_manager.release(worker, response=response)
-            events.put({"type": "done", "response": response.model_dump()})
+            response = lease.worker.service.ask_with_updates(
+                question=request_data.question,
+                model=request_data.model,
+                on_update=on_update,
+            )
+            lease.release(response=response)
+            events.put({"type": "done", "response": _ui_response_payload(response)})
         except Exception as exc:
-            pool_manager.release(worker, exc=exc)
+            lease.release(exc=exc)
             events.put(
                 {
                     "type": "error",
@@ -135,7 +236,6 @@ def _build_stream(
                 }
             )
         finally:
-            rate_limiter.release(client_ip)
             events.put(done_marker)
 
     threading.Thread(target=runner, daemon=True).start()
@@ -153,11 +253,7 @@ def create_chat_ui_app(
     rate_limiter: UIRateLimiter | None = None,
 ) -> FastAPI:
     settings = service.settings
-    assets = {
-        "index.html": _load_asset("index.html"),
-        "app.css": _load_asset("app.css"),
-        "app.js": _load_asset("app.js"),
-    }
+    assets = _load_ui_assets()
     pool = pool_manager or WorkerPoolManager(
         template_settings=settings,
         worker_count=settings.ui_worker_count,
@@ -177,13 +273,14 @@ def create_chat_ui_app(
     def index() -> HTMLResponse:
         return HTMLResponse(assets["index.html"], headers={"Cache-Control": "no-store"})
 
-    @app.get("/assets/app.css")
-    def asset_css() -> Response:
-        return Response(content=assets["app.css"], media_type="text/css")
-
-    @app.get("/assets/app.js")
-    def asset_js() -> Response:
-        return Response(content=assets["app.js"], media_type="application/javascript")
+    @app.get("/assets/{asset_name:path}")
+    def asset(asset_name: str) -> Response:
+        normalized_name = PurePosixPath(asset_name).as_posix().lstrip("/")
+        content = assets.get(normalized_name)
+        media_type = _asset_media_type(normalized_name)
+        if content is None or media_type is None:
+            return Response(status_code=404)
+        return Response(content=content, media_type=media_type, headers={"Cache-Control": "no-store"})
 
     @app.get("/api/ui-config")
     def api_ui_config() -> JSONResponse:
@@ -211,57 +308,38 @@ def create_chat_ui_app(
 
     @app.post("/api/ask")
     def api_ask(request: Request, payload: dict[str, Any] | None = Body(default=None)) -> JSONResponse:
-        question = _extract_question(payload)
-        model = _extract_model(payload)
-        if not question:
-            return _json_error("ASK_TIMEOUT", "question is required", status_code=400)
-
-        client_ip = _resolve_client_ip(request, settings)
-        decision = limiter.try_acquire(client_ip)
-        if not decision.allowed:
-            return _rate_limited_response(decision.retry_after_seconds or 1)
-
-        worker = pool.try_acquire()
-        if worker is None:
-            limiter.release(client_ip)
-            return _busy_response()
+        request_data, lease, error_response = _acquire_ui_worker(
+            request,
+            payload,
+            settings=settings,
+            pool=pool,
+            limiter=limiter,
+        )
+        if error_response is not None:
+            return error_response
 
         try:
-            response = worker.service.ask(question=question, model=model)
-            pool.release(worker, response=response)
-            return JSONResponse(response.model_dump())
+            response = lease.worker.service.ask(question=request_data.question, model=request_data.model)
+            lease.release(response=response)
+            return JSONResponse(_ui_response_payload(response))
         except Exception as exc:
-            pool.release(worker, exc=exc)
+            lease.release(exc=exc)
             return _json_error("CAPTURE_FAILED", str(exc), status_code=500)
-        finally:
-            limiter.release(client_ip)
 
     @app.post("/api/ask-stream")
     def api_ask_stream(request: Request, payload: dict[str, Any] | None = Body(default=None)) -> Response:
-        question = _extract_question(payload)
-        model = _extract_model(payload)
-        if not question:
-            return _json_error("ASK_TIMEOUT", "question is required", status_code=400)
-
-        client_ip = _resolve_client_ip(request, settings)
-        decision = limiter.try_acquire(client_ip)
-        if not decision.allowed:
-            return _rate_limited_response(decision.retry_after_seconds or 1)
-
-        worker = pool.try_acquire()
-        if worker is None:
-            limiter.release(client_ip)
-            return _busy_response()
+        request_data, lease, error_response = _acquire_ui_worker(
+            request,
+            payload,
+            settings=settings,
+            pool=pool,
+            limiter=limiter,
+        )
+        if error_response is not None:
+            return error_response
 
         return StreamingResponse(
-            _build_stream(
-                worker=worker,
-                pool_manager=pool,
-                rate_limiter=limiter,
-                client_ip=client_ip,
-                question=question,
-                model=model,
-            ),
+            _build_stream(request_data=request_data, lease=lease),
             media_type="application/x-ndjson",
             headers={"Cache-Control": "no-store"},
         )
