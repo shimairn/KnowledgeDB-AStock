@@ -15,6 +15,8 @@ class Settings:
     kb_name: str = field(default_factory=lambda: os.getenv("IMA_KB_NAME", "\u7231\u5206\u4eab"))
     kb_owner: str = field(default_factory=lambda: os.getenv("IMA_KB_OWNER", "\u8d2d\u7269\u5c0f\u52a9\u624b"))
     kb_title: str = field(default_factory=lambda: os.getenv("IMA_KB_TITLE", "\u3010\u7231\u5206\u4eab\u3011\u7684\u8d22\u7ecf\u8d44\u8baf"))
+    # UI-only label (does not affect KB matching/selection in the driver).
+    kb_label: str = field(default_factory=lambda: os.getenv("IMA_KB_LABEL", "\u8d22\u7ecf\u77e5\u8bc6\u5e93"))
     mode_name: str = field(default_factory=lambda: os.getenv("IMA_MODE_NAME", "\u5bf9\u8bdd\u6a21\u5f0f"))
     model_prefix: str = field(default_factory=lambda: os.getenv("IMA_MODEL_PREFIX", "DS V3.2 T"))
 
@@ -42,6 +44,10 @@ class Settings:
     ui_rate_limit_per_minute: int = field(default_factory=lambda: int(os.getenv("IMA_UI_RATE_LIMIT_PER_MINUTE", "12")))
     ui_max_concurrent_per_ip: int = field(default_factory=lambda: int(os.getenv("IMA_UI_MAX_CONCURRENT_PER_IP", "2")))
     ui_trust_proxy: bool = field(default_factory=lambda: os.getenv("IMA_UI_TRUST_PROXY", "0") == "1")
+    output_gc_enabled: bool = field(default_factory=lambda: os.getenv("IMA_OUTPUT_GC_ENABLED", "1") == "1")
+    output_gc_interval_seconds: float = field(default_factory=lambda: float(os.getenv("IMA_OUTPUT_GC_INTERVAL_SECONDS", "1800")))
+    output_gc_retention_hours: float = field(default_factory=lambda: float(os.getenv("IMA_OUTPUT_GC_RETENTION_HOURS", "24")))
+    output_gc_include_profiles: bool = field(default_factory=lambda: os.getenv("IMA_OUTPUT_GC_INCLUDE_PROFILES", "0") == "1")
 
     @property
     def cdp_endpoint(self) -> str:

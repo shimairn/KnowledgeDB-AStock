@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 import json
+import mimetypes
+import socket
 import threading
 import webbrowser
 from dataclasses import dataclass
@@ -12,9 +14,10 @@ from typing import Any, AsyncIterator
 
 import uvicorn
 from fastapi import Body, FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 
 from ima_bridge.config import Settings
+from ima_bridge.output_gc import start_output_gc_thread
 from ima_bridge.service import IMAAskService
 from ima_bridge.ui_answer_cleaner import clean_answer_html, clean_answer_payload
 from ima_bridge.ui_rate_limit import UIRateLimiter
@@ -123,7 +126,7 @@ def _parse_ui_request(payload: dict[str, Any] | None) -> UIAskRequest:
 
 
 def _kb_label(settings: Settings) -> str:
-    return f"{settings.kb_name} / {settings.kb_owner} / {settings.kb_title}"
+    return settings.kb_label.strip() or "财经知识库"
 
 
 def _resolve_client_ip(request: Request, settings: Settings) -> str:
@@ -306,12 +309,37 @@ def create_chat_ui_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
+        gc_stop = None
+        gc_thread = None
+        if getattr(settings, "output_gc_enabled", False):
+            exclude_dirs = []
+            if not getattr(settings, "output_gc_include_profiles", False):
+                # Avoid deleting active browser profiles by default. Windows file locks are common here.
+                exclude_dirs.extend(
+                    [
+                        settings.web_profile_dir.parent,
+                        settings.managed_profile_dir.parent,
+                    ]
+                )
+
+            retention_seconds = float(getattr(settings, "output_gc_retention_hours", 24.0)) * 3600.0
+            gc_stop, gc_thread = start_output_gc_thread(
+                root_dir=settings.artifacts_dir,
+                interval_seconds=float(getattr(settings, "output_gc_interval_seconds", 1800.0)),
+                retention_seconds=retention_seconds,
+                exclude_dirs=exclude_dirs,
+            )
+
         refresh = getattr(pool, "refresh_in_background", None)
         if callable(refresh):
             refresh()
         try:
             yield
         finally:
+            if gc_stop is not None:
+                gc_stop.set()
+            if gc_thread is not None:
+                gc_thread.join(timeout=2.0)
             close_pool = getattr(pool, "close", None)
             if callable(close_pool):
                 close_pool()
@@ -362,6 +390,23 @@ def create_chat_ui_app(
     @app.get("/api/health")
     def api_health() -> JSONResponse:
         return JSONResponse(pool.health_payload())
+
+    @app.get("/api/media/{instance}/{media_name:path}")
+    def api_media(instance: str, media_name: str) -> Response:
+        base_dir = (settings.artifacts_dir / "ui-media").resolve()
+        candidate = (base_dir / instance / media_name).resolve()
+        try:
+            candidate.relative_to(base_dir)
+        except ValueError:
+            return Response(status_code=404)
+        if not candidate.exists() or not candidate.is_file():
+            return Response(status_code=404)
+        media_type, _ = mimetypes.guess_type(str(candidate))
+        return FileResponse(
+            path=str(candidate),
+            media_type=media_type or "application/octet-stream",
+            headers={"Cache-Control": "no-store"},
+        )
 
     @app.post("/api/ask")
     def api_ask(request: Request, payload: dict[str, Any] | None = Body(default=None)) -> JSONResponse:
@@ -415,12 +460,37 @@ def run_chat_ui(
         print("ui concurrent service only supports --driver web")
         return 2
 
+    # Fail fast before starting background worker warmup threads.
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except OSError:
+        infos = [(socket.AF_INET, socket.SOCK_STREAM, 0, "", (host, port))]
+
+    port_in_use = True
+    for family, socktype, proto, _canon, sockaddr in infos:
+        try:
+            sock = socket.socket(family, socktype, proto)
+            try:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            except OSError:
+                pass
+            sock.bind(sockaddr)
+        except OSError:
+            continue
+        else:
+            port_in_use = False
+            sock.close()
+            break
+
+    if port_in_use:
+        print(f"ui failed: port already in use: {host}:{port}")
+        return 2
+
     pool_manager = WorkerPoolManager(
         template_settings=service.settings,
         worker_count=workers if workers is not None else service.settings.ui_worker_count,
     )
     pool_manager.seed_profiles_from(service.settings)
-    pool_manager.refresh_in_background()
     app = create_chat_ui_app(service=service, pool_manager=pool_manager)
 
     browser_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
@@ -429,5 +499,12 @@ def run_chat_ui(
     if open_browser:
         webbrowser.open(url)
 
-    uvicorn.run(app, host=host, port=port, log_level="warning")
+    try:
+        uvicorn.run(app, host=host, port=port, log_level="warning")
+    finally:
+        # If uvicorn fails to start (e.g. bind error), the app lifespan won't run,
+        # so ensure worker resources are still cleaned up.
+        close_pool = getattr(pool_manager, "close", None)
+        if callable(close_pool):
+            close_pool()
     return 0

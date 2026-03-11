@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor
+import re
 import threading
 import time
 from typing import Callable
@@ -18,7 +19,12 @@ from ima_bridge.driver_protocol import (
 )
 from ima_bridge.errors import CaptureFailedError
 from ima_bridge.service import IMAAskService
+from ima_bridge.ui_media import download_images_to_local, inject_placeholder_img_sources
 from ima_bridge.web_driver import WebAskDriver
+from ima_bridge.utils import get_logger, timestamp_slug
+
+logger = get_logger("ima_bridge.web_worker_service")
+_VECTOR_PLACEHOLDER_RE = re.compile(r"data-ima-bridge-media=(?:\"|')(vector-\d+)(?:\"|')", re.IGNORECASE)
 
 
 class PersistentWebAskDriver(AskDriver):
@@ -223,6 +229,7 @@ class PersistentWebAskDriver(AskDriver):
         on_update: Callable[..., None] | None,
     ) -> DriverAskResult:
         page = self._safe_prepare_chat_page()
+        context = page.context
         self.web_driver.conversation.start_new_conversation(page)
         selected_model = self.web_driver.conversation.ensure_selected_model(page, requested_model=model)
 
@@ -250,12 +257,73 @@ class PersistentWebAskDriver(AskDriver):
         references = self.web_driver.answer_extractor.extract_references(answer_text)
         screenshot = self.web_driver.answer_extractor.capture(page) if self.settings.capture_screenshot else None
         self._request_count += 1
+
+        localized_html = answer_html
+        if localized_html:
+            try:
+                output_dir = self.settings.artifacts_dir / "ui-media" / self.settings.instance
+                localized_html, localized = download_images_to_local(
+                    page=page,
+                    context=context,
+                    answer_html=localized_html,
+                    output_dir=output_dir,
+                    url_prefix=f"/api/media/{self.settings.instance}",
+                    max_images=16,
+                    max_bytes=25 * 1024 * 1024,
+                )
+                if localized:
+                    logger.info("localized images: count=%s instance=%s", len(localized), self.settings.instance)
+
+                placeholders = _VECTOR_PLACEHOLDER_RE.findall(localized_html)
+                if placeholders:
+                    placeholder_urls: dict[str, str] = {}
+                    try:
+                        target = self.web_driver.answer_extractor.find_latest_ai_nodes(page)
+                    except Exception:
+                        target = None
+                    if target is not None:
+                        _container, bubble = target
+                        root = bubble.locator("div[class*='_markdown_']").first
+                        try:
+                            if root.count() == 0:
+                                root = bubble
+                        except Exception:
+                            root = bubble
+
+                        media = root.locator("svg,canvas")
+                        try:
+                            media_count = media.count()
+                        except Exception:
+                            media_count = 0
+
+                        if media_count:
+                            stamp = timestamp_slug()
+                            output_dir.mkdir(parents=True, exist_ok=True)
+                            for i in range(min(media_count, len(placeholders))):
+                                placeholder_id = placeholders[i]
+                                filename = f"{placeholder_id}-{stamp}-{i}.png"
+                                path = output_dir / filename
+                                try:
+                                    media.nth(i).screenshot(path=str(path))
+                                except Exception:
+                                    continue
+                                placeholder_urls[placeholder_id] = f"/api/media/{self.settings.instance}/{filename}"
+
+                    if placeholder_urls:
+                        localized_html = inject_placeholder_img_sources(localized_html, placeholder_urls)
+                        logger.info(
+                            "snapshotted vector media: count=%s instance=%s",
+                            len(placeholder_urls),
+                            self.settings.instance,
+                        )
+            except Exception:
+                localized_html = answer_html
         return DriverAskResult(
             source_driver="web",
             model=selected_model,
             thinking_text=thinking_text,
             answer_text=answer_text,
-            answer_html=answer_html,
+            answer_html=localized_html,
             references=references,
             screenshot_path=screenshot,
         )
@@ -319,4 +387,3 @@ class WebWorkerService:
         on_update: Callable[..., None] | None = None,
     ) -> Future:
         return self._submit(self._service.ask_with_updates, question, model, on_update)
-

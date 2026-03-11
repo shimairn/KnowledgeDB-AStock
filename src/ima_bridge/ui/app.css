@@ -221,7 +221,7 @@ pre {
   box-shadow: var(--shadow-md);
   overflow: auto;
   padding: 16px 14px;
-  scroll-behavior: smooth;
+  scroll-behavior: auto;
 }
 
 .empty-state {
@@ -399,6 +399,11 @@ pre {
   word-break: break-word;
 }
 
+.rich-content--typing pre {
+  background: rgba(15, 23, 42, 0.02);
+  border-color: rgba(15, 23, 42, 0.06);
+}
+
 .rich-content :not(pre) > code {
   padding: 0.12em 0.38em;
   border-radius: 8px;
@@ -409,11 +414,38 @@ pre {
 .rich-content img {
   display: block;
   max-width: 100%;
+  max-height: 60vh;
   height: auto;
+  object-fit: contain;
   margin: 16px 0;
   border-radius: 16px;
-  background: rgba(255, 255, 255, 0.92);
-  box-shadow: 0 22px 44px rgba(15, 23, 42, 0.1);
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  background: rgba(15, 23, 42, 0.02);
+}
+
+.rich-content img.rich-img--loading {
+  opacity: 0.35;
+  filter: blur(10px);
+}
+
+.rich-content img.rich-img--loaded {
+  opacity: 1;
+  filter: none;
+  transition: opacity 220ms ease, filter 220ms ease;
+}
+
+.rich-content img.rich-img--broken {
+  display: none;
+}
+
+.rich-img-fallback {
+  margin: 12px 0;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px dashed rgba(15, 23, 42, 0.16);
+  background: rgba(15, 23, 42, 0.03);
+  color: #475569;
+  font-size: 0.92em;
 }
 
 .rich-content table {
@@ -456,12 +488,12 @@ pre {
 }
 
 .composer {
-  border: 1px solid rgba(255, 255, 255, 0.62);
+  border: 1px solid rgba(15, 23, 42, 0.08);
   border-radius: var(--radius-lg);
-  background: rgba(255, 251, 245, 0.86);
-  box-shadow: var(--shadow-sm);
+  background: linear-gradient(180deg, rgba(255, 252, 248, 0.92), rgba(255, 248, 238, 0.86));
+  box-shadow: 0 18px 34px rgba(15, 23, 42, 0.08);
   backdrop-filter: blur(14px);
-  padding: 12px 12px 10px;
+  padding: 12px 12px 11px;
 }
 
 .composer-frame {
@@ -473,14 +505,27 @@ pre {
   width: 100%;
   resize: none;
   padding: 12px 12px;
-  border: 1px solid var(--line);
+  border: 1px solid rgba(15, 23, 42, 0.10);
   border-radius: var(--radius-md);
-  background: rgba(255, 255, 255, 0.88);
+  background: rgba(255, 255, 255, 0.92);
   color: var(--text);
   line-height: 1.6;
   min-height: 52px;
   max-height: 220px;
   overflow-y: auto;
+  outline: none;
+  box-shadow: 0 1px 0 rgba(15, 23, 42, 0.04);
+  transition: border-color 140ms ease, box-shadow 140ms ease, background 140ms ease;
+}
+
+.composer-input::placeholder {
+  color: rgba(71, 85, 105, 0.78);
+}
+
+.composer-input:focus {
+  border-color: rgba(29, 78, 216, 0.42);
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 0 0 4px rgba(29, 78, 216, 0.12), 0 10px 20px rgba(15, 23, 42, 0.06);
 }
 
 .composer-controls {
@@ -513,7 +558,7 @@ pre {
 .send-button {
   border: 1px solid rgba(15, 23, 42, 0.14);
   border-radius: 999px;
-  background: rgba(15, 23, 42, 0.92);
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.95), rgba(15, 23, 42, 0.88));
   color: rgba(255, 255, 255, 0.96);
   padding: 10px 14px;
   cursor: pointer;

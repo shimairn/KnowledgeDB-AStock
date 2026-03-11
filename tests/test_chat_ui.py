@@ -185,8 +185,8 @@ def test_chat_ui_serves_static_index_and_assets(tmp_path, monkeypatch):
     assert 'id="emptyState"' in index_response.text
     assert 'id="newConversationBtn"' in index_response.text
     assert 'id="conversationViewport"' in index_response.text
-    assert 'id="modelMenu"' in index_response.text
-    assert 'id="modelMenuList"' in index_response.text
+    assert 'id="modelMenu"' not in index_response.text
+    assert 'id="modelMenuList"' not in index_response.text
     assert 'id="appSidebar"' not in index_response.text
     assert 'id="sidebarToggleBtn"' not in index_response.text
     assert 'id="sourceDrawer"' not in index_response.text
@@ -197,7 +197,7 @@ def test_chat_ui_serves_static_index_and_assets(tmp_path, monkeypatch):
     assert "<header" in index_response.text
     assert 'id="modelSelect"' not in index_response.text
     assert 'id="clearBtn"' not in index_response.text
-    assert 'id="modelMenu"' in composer_markup
+    assert 'id="modelMenu"' not in composer_markup
     assert 'id="sendBtn"' in composer_markup
     assert 'id="newConversationBtn"' in composer_markup
 
@@ -206,9 +206,9 @@ def test_chat_ui_serves_static_index_and_assets(tmp_path, monkeypatch):
     assert render_response.status_code == 404
     assert view_response.status_code == 404
     assert "/assets/app-main.js" in js_response.text
-    assert "modelMenu" in main_response.text
+    assert "modelMenu" not in main_response.text
     assert "scheduleHealthRefresh" in main_response.text
-    assert "sanitizeHtml" in main_response.text
+    assert "createRichTypewriter" in main_response.text
     assert "createMessageRenderer" not in main_response.text
     assert "prepareAnswerRender" not in main_response.text
 
@@ -228,7 +228,7 @@ def test_chat_ui_ui_config_and_health_are_anonymous(tmp_path, monkeypatch):
     assert config_response.json()["health"]["status"] == "ready"
     assert config_response.json()["startup_poll_interval_ms"] > 0
     assert config_response.json()["steady_poll_interval_ms"] > config_response.json()["startup_poll_interval_ms"]
-    assert settings.kb_name in config_response.json()["kb_label"]
+    assert config_response.json()["kb_label"] == settings.kb_label
     assert config_response.json()["current_model"] == "DeepSeek V3.2 Think"
     assert config_response.json()["model_options"][0]["label"] == "DeepSeek V3.2 Think"
     assert health_response.status_code == 200

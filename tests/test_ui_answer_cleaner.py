@@ -61,6 +61,14 @@ def test_clean_answer_html_keeps_regular_content_images():
     assert "刻蚀设备示意图" in cleaned
 
 
+def test_clean_answer_html_keeps_images_even_if_class_contains_ima():
+    raw = '<figure><img class="ima-chart" src="https://example.com/chart.png" alt="走势图" /></figure>'
+    cleaned = clean_answer_html(raw)
+
+    assert "chart.png" in cleaned
+    assert "走势图" in cleaned
+
+
 def test_clean_answer_html_removes_file_reference_blocks_and_inline_indexes():
     raw = (
         '<div class="pageListWrap">'

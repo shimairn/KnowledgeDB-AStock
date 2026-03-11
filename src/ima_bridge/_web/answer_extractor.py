@@ -323,8 +323,6 @@ class WebAnswerExtractor:
                     "button",
                     "select",
                     "option",
-                    "canvas",
-                    "svg",
                     "header",
                     "footer",
                     "nav",
@@ -344,6 +342,17 @@ class WebAnswerExtractor:
                     for (const item of Array.from(root.querySelectorAll(selector))) {
                       item.remove();
                     }
+                  }
+
+                  // Some answers render charts as inline svg/canvas. Inline media is stripped later for safety,
+                  // so replace them with <img> placeholders that the backend can snapshot to PNG and serve locally.
+                  const media = Array.from(root.querySelectorAll("svg,canvas"));
+                  for (let i = 0; i < media.length; i += 1) {
+                    const node = media[i];
+                    const placeholder = document.createElement("img");
+                    placeholder.setAttribute("data-ima-bridge-media", `vector-${i}`);
+                    placeholder.setAttribute("alt", "");
+                    node.replaceWith(placeholder);
                   }
 
                   return { html: root.outerHTML.trim() };

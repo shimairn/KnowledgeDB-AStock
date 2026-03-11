@@ -62,7 +62,9 @@ INLINE_AUXILIARY_RE = re.compile(
 DECORATIVE_MEDIA_RE = re.compile(r"<(?:svg|canvas)\b.*?</(?:svg|canvas)>", re.IGNORECASE | re.DOTALL)
 DECORATIVE_IMG_RE = re.compile(
     r"<img\b(?=[^>]*(?:class|id|alt|aria-label|title)=['\"][^'\"]*"
-    r"(?:icon|logo|brand|avatar|badge|watermark|ima)[^'\"]*['\"])[^>]*>",
+    # NOTE: Do not match "ima" alone here. Many legitimate answer images include "ima" in
+    # class/id/alt attributes, and stripping them results in large empty placeholders in the UI.
+    r"(?:icon|logo|brand|avatar|badge|watermark)[^'\"]*['\"])[^>]*>",
     re.IGNORECASE,
 )
 INLINE_CONTEXT_REF_RE = re.compile(

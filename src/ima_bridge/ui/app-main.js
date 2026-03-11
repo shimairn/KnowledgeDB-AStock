@@ -1,8 +1,16 @@
 const HTML_BASE_URL = "https://ima.qq.com/";
+
+const DEFAULT_KB_LABEL = "财经知识库";
+
 const DEFAULT_STARTUP_POLL_INTERVAL_MS = 1500;
 const DEFAULT_STEADY_POLL_INTERVAL_MS = 15000;
+
 const QUESTION_MIN_HEIGHT = 52;
 const QUESTION_MAX_HEIGHT = 220;
+const SCROLL_BOTTOM_THRESHOLD_PX = 80;
+
+// 1 char per tick, can be slower than backend updates.
+const TYPEWRITER_TICK_MS = 20;
 
 const dom = {
   kbLabel: document.getElementById("kbLabel"),
@@ -16,8 +24,6 @@ const dom = {
   question: document.getElementById("question"),
   sendBtn: document.getElementById("sendBtn"),
   newConversationBtn: document.getElementById("newConversationBtn"),
-  modelMenu: document.getElementById("modelMenu"),
-  modelMenuList: document.getElementById("modelMenuList"),
 };
 
 const state = {
@@ -25,13 +31,12 @@ const state = {
   healthPollTimer: 0,
   startupPollIntervalMs: DEFAULT_STARTUP_POLL_INTERVAL_MS,
   steadyPollIntervalMs: DEFAULT_STEADY_POLL_INTERVAL_MS,
-  modelOptions: [],
-  selectedModel: "",
-  lastHealth: null,
+  isPinnedToBottom: true,
+  lastViewportScrollTop: 0,
 };
 
 export async function bootstrap() {
-  setKbLabel("知识库");
+  setKbLabel(DEFAULT_KB_LABEL);
   setStatus("ready", "初始化中...");
   clearConversation({ focus: false });
   syncQuestionHeight();
@@ -41,12 +46,12 @@ export async function bootstrap() {
 
   try {
     const config = await loadUiConfig();
-    applyHealthPayload(config.health || null);
     scheduleHealthRefresh(getHealthRefreshDelay(config.health || null));
   } catch (_) {
-    await refreshHealth();
+    scheduleHealthRefresh(state.startupPollIntervalMs);
   }
 
+  await refreshHealth();
   dom.question?.focus();
 }
 
@@ -81,18 +86,28 @@ function bindEvents() {
     });
   }
 
-  if (dom.modelMenuList) {
-    dom.modelMenuList.addEventListener("change", () => {
-      const value = String(dom.modelMenuList.value || "").trim();
-      state.selectedModel = value;
-      syncUiState();
-      dom.question?.focus();
-    });
+  if (dom.conversationViewport) {
+    dom.conversationViewport.addEventListener(
+      "scroll",
+      () => {
+        const viewport = dom.conversationViewport;
+        const nextTop = viewport.scrollTop;
+        const scrolledUp = nextTop < state.lastViewportScrollTop - 1;
+        if (scrolledUp) {
+          // User explicitly scrolled up: stop auto-follow even if still near the bottom.
+          state.isPinnedToBottom = false;
+        } else if (isNearBottom(viewport)) {
+          state.isPinnedToBottom = true;
+        }
+        state.lastViewportScrollTop = nextTop;
+      },
+      { passive: true },
+    );
   }
 }
 
 function setKbLabel(value) {
-  const text = String(value || "").trim() || "知识库";
+  const text = String(value || "").trim() || DEFAULT_KB_LABEL;
   if (dom.kbLabel) {
     dom.kbLabel.textContent = text;
   }
@@ -137,14 +152,6 @@ function syncComposerState() {
     dom.newConversationBtn.hidden = !hasHistory;
     dom.newConversationBtn.disabled = state.isBusy || !hasHistory;
   }
-
-  if (dom.modelMenu) {
-    dom.modelMenu.hidden = state.modelOptions.length <= 1;
-  }
-
-  if (dom.modelMenuList) {
-    dom.modelMenuList.disabled = state.isBusy || state.modelOptions.length <= 1;
-  }
 }
 
 function syncUiState() {
@@ -164,13 +171,32 @@ function syncQuestionHeight() {
   dom.question.style.height = `${nextHeight}px`;
 }
 
-function scrollChatToBottom() {
+function isNearBottom(viewport) {
+  if (!viewport) {
+    return true;
+  }
+  const remaining = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
+  return remaining <= SCROLL_BOTTOM_THRESHOLD_PX;
+}
+
+function scrollChatToBottom(options = {}) {
   if (!dom.conversationViewport) {
+    return;
+  }
+  const { force = false } = options;
+  if (!force && !state.isPinnedToBottom) {
     return;
   }
   dom.conversationViewport.scrollTo({
     top: dom.conversationViewport.scrollHeight,
     behavior: "auto",
+  });
+  state.isPinnedToBottom = true;
+  window.requestAnimationFrame(() => {
+    if (!dom.conversationViewport) {
+      return;
+    }
+    state.lastViewportScrollTop = dom.conversationViewport.scrollTop;
   });
 }
 
@@ -185,6 +211,8 @@ function clearConversation(options = {}) {
   if (dom.conversationViewport) {
     dom.conversationViewport.scrollTop = 0;
   }
+  state.isPinnedToBottom = true;
+  state.lastViewportScrollTop = 0;
   syncQuestionHeight();
   syncUiState();
   if (focus) {
@@ -211,9 +239,20 @@ function appendUserMessage(text) {
   dom.chat.appendChild(row);
 }
 
-function createAssistantMessage({ placeholder = "" } = {}) {
+function createLoaderNode() {
+  const loader = document.createElement("div");
+  loader.className = "bubble__loader";
+  for (let i = 0; i < 3; i += 1) {
+    const dot = document.createElement("span");
+    dot.className = "bubble__loader-dot";
+    loader.appendChild(dot);
+  }
+  return loader;
+}
+
+function createAssistantMessage() {
   if (!dom.chat) {
-    return { row: null, body: null };
+    return null;
   }
 
   const row = document.createElement("article");
@@ -222,90 +261,446 @@ function createAssistantMessage({ placeholder = "" } = {}) {
   const bubble = document.createElement("div");
   bubble.className = "bubble bubble--assistant";
 
-  const body = document.createElement("div");
-  body.className = "rich-content";
-  if (placeholder) {
-    body.className = "bubble__placeholder";
-    body.textContent = placeholder;
-  }
+  const loader = createLoaderNode();
 
-  bubble.appendChild(body);
+  const content = document.createElement("div");
+  content.className = "rich-content rich-content--typing";
+  content.hidden = true;
+
+  bubble.appendChild(loader);
+  bubble.appendChild(content);
   row.appendChild(bubble);
   dom.chat.appendChild(row);
-  return { row, body };
+
+  let lastScrollAt = 0;
+  const typer = createRichTypewriter(content, {
+    tickMs: TYPEWRITER_TICK_MS,
+    onStart: () => {
+      loader.hidden = true;
+      content.hidden = false;
+    },
+    onProgress: () => {
+      const now = typeof performance !== "undefined" ? performance.now() : Date.now();
+      if (now - lastScrollAt >= 120) {
+        lastScrollAt = now;
+        scrollChatToBottom();
+      }
+    },
+    onDone: () => {
+      content.classList.remove("rich-content--typing");
+    },
+  });
+
+  return {
+    row,
+    bubble,
+    loader,
+    content,
+    typer,
+    setError(message) {
+      typer.stop();
+      loader.hidden = true;
+      content.hidden = false;
+      content.className = "bubble__text";
+      content.textContent = String(message || "");
+    },
+  };
 }
 
-function setAssistantHtml(host, html) {
-  if (!host) {
-    return;
-  }
-  host.className = "rich-content";
-  host.innerHTML = sanitizeHtml(String(html || ""));
+function escapeHtml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
-function setAssistantText(host, text) {
-  if (!host) {
-    return;
-  }
-  host.className = "bubble__text";
-  host.textContent = String(text || "");
-}
-
-function sanitizeHtml(rawHtml) {
-  const source = String(rawHtml || "").trim();
-  if (!source) {
+function plainTextToHtml(text) {
+  const normalized = String(text || "").trim();
+  if (!normalized) {
     return "";
   }
+  return `<p>${escapeHtml(normalized).replace(/\n/g, "<br>")}</p>`;
+}
 
-  const parser = new DOMParser();
-  const documentHtml = /<html[\s>]/i.test(source)
-    ? source
-    : `<!doctype html><html><head></head><body>${source}</body></html>`;
-  const doc = parser.parseFromString(documentHtml, "text/html");
+const RICH_DROP_TAGS = new Set([
+  "script",
+  "noscript",
+  "style",
+  "link",
+  "meta",
+  "base",
+  "iframe",
+  "object",
+  "embed",
+  "form",
+  "input",
+  "textarea",
+  "button",
+  "select",
+  "option",
+  "svg",
+  "canvas",
+]);
 
-  doc.querySelectorAll("script,noscript,style,link,meta,base,iframe,object,embed,form,input,textarea,button,select,option,svg,canvas").forEach((node) => node.remove());
+function createRichTypewriter(container, { tickMs, onStart, onProgress, onDone }) {
+  let typedLen = 0;
+  let segments = [];
+  let segmentIndex = 0;
+  let segmentOffset = 0;
+  let totalLen = 0;
 
-  Array.from(doc.querySelectorAll("*")).forEach((el) => {
-    Array.from(el.attributes).forEach((attr) => {
-      const name = attr.name.toLowerCase();
-      const value = String(attr.value || "");
-      if (name.startsWith("on")) {
-        el.removeAttribute(attr.name);
+  let done = false;
+  let running = false;
+  let raf = 0;
+  let lastTickAt = 0;
+
+  let pendingHtml = "";
+  let lastBuiltHtml = "";
+  let lastBuiltIncludeImages = false;
+  let buildTimer = 0;
+  let lastBuildAt = 0;
+  let startedDisplay = false;
+
+  const stop = () => {
+    running = false;
+    if (raf) {
+      window.cancelAnimationFrame(raf);
+      raf = 0;
+    }
+    if (buildTimer) {
+      window.clearTimeout(buildTimer);
+      buildTimer = 0;
+    }
+  };
+
+  const scheduleBuild = () => {
+    if (buildTimer) {
+      return;
+    }
+    const now = typeof performance !== "undefined" ? performance.now() : Date.now();
+    const minIntervalMs = 140;
+    const delay = Math.max(0, minIntervalMs - (now - lastBuildAt));
+    buildTimer = window.setTimeout(() => {
+      buildTimer = 0;
+      lastBuildAt = typeof performance !== "undefined" ? performance.now() : Date.now();
+      buildFromPending();
+    }, delay);
+  };
+
+  const isLocalUrlPath = (value) => {
+    return (
+      typeof value === "string" &&
+      value.startsWith("/") &&
+      (value.startsWith("/api/") || value.startsWith("/assets/"))
+    );
+  };
+
+  const normalizeUrl = (raw) => {
+    const value = String(raw || "").trim();
+    if (!value) {
+      return "";
+    }
+    if (/^(?:javascript|vbscript):/i.test(value)) {
+      return "";
+    }
+    if (isLocalUrlPath(value)) {
+      return value;
+    }
+    try {
+      return new URL(value, HTML_BASE_URL).href;
+    } catch (_) {
+      return "";
+    }
+  };
+
+  const normalizeImageSrc = (raw) => {
+    const value = String(raw || "").trim();
+    if (!value) {
+      return "";
+    }
+    if (/^(?:javascript|vbscript):/i.test(value)) {
+      return "";
+    }
+    if (isLocalUrlPath(value)) {
+      return value;
+    }
+    if (/^data:/i.test(value)) {
+      return /^data:image\//i.test(value) ? value : "";
+    }
+    if (/^blob:/i.test(value)) {
+      return value;
+    }
+    return normalizeUrl(value);
+  };
+
+  const cloneRichNode = (node, outSegments) => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      const full = node.nodeValue || "";
+      const textNode = document.createTextNode("");
+      outSegments.push({ node: textNode, fullText: full });
+      return textNode;
+    }
+
+    if (node.nodeType !== Node.ELEMENT_NODE) {
+      return null;
+    }
+
+    const source = node;
+    const tag = String(source.tagName || "").toLowerCase();
+    if (!tag || RICH_DROP_TAGS.has(tag)) {
+      return null;
+    }
+
+    // Avoid constantly reloading images while streaming (DOM rebuilds can restart requests).
+    // Images are injected once at the end when `markDone()` is called.
+    if (tag === "img" && !done) {
+      return null;
+    }
+
+    const el = document.createElement(tag);
+    Array.from(source.attributes || []).forEach((attr) => {
+      const name = String(attr.name || "");
+      const lower = name.toLowerCase();
+      if (!name || lower.startsWith("on") || lower === "style") {
         return;
       }
-      if (name === "href" || name === "src") {
-        if (/^(?:javascript|vbscript|data):/i.test(value.trim())) {
-          el.removeAttribute(attr.name);
+      if (tag === "a" && lower === "href") {
+        return;
+      }
+      if (tag === "img" && (lower === "src" || lower === "srcset" || lower === "width" || lower === "height")) {
+        return;
+      }
+      el.setAttribute(name, String(attr.value || ""));
+    });
+
+    if (tag === "a") {
+      const href = normalizeUrl(source.getAttribute("href") || "");
+      if (href) {
+        el.setAttribute("href", href);
+        el.setAttribute("target", "_blank");
+        el.setAttribute("rel", "noopener noreferrer");
+      }
+    }
+
+    if (tag === "img") {
+      const src = normalizeImageSrc(source.getAttribute("src") || "");
+      if (src) {
+        el.setAttribute("src", src);
+      }
+      el.setAttribute("loading", "lazy");
+      el.setAttribute("decoding", "async");
+      if (!el.getAttribute("alt")) {
+        el.setAttribute("alt", "");
+      }
+      el.classList.add("rich-img", "rich-img--loading");
+    }
+
+    Array.from(source.childNodes || []).forEach((child) => {
+      const cloned = cloneRichNode(child, outSegments);
+      if (cloned) {
+        el.appendChild(cloned);
+      }
+    });
+    return el;
+  };
+
+  const wireRichContent = () => {
+    if (!container || !container.isConnected) {
+      return;
+    }
+
+    container.querySelectorAll("a[href]").forEach((a) => {
+      a.setAttribute("target", "_blank");
+      a.setAttribute("rel", "noopener noreferrer");
+    });
+
+    container.querySelectorAll("img").forEach((img) => {
+      const src = String(img.getAttribute("src") || "").trim();
+      if (!src) {
+        img.classList.add("rich-img--broken");
+        const fallback = document.createElement("div");
+        fallback.className = "rich-img-fallback";
+        fallback.textContent = "图片地址为空";
+        try {
+          img.insertAdjacentElement("afterend", fallback);
+        } catch (_) {
+          // ignore
+        }
+        return;
+      }
+
+      const onLoad = () => {
+        img.classList.remove("rich-img--loading");
+        img.classList.add("rich-img--loaded");
+      };
+
+      const onError = () => {
+        img.classList.add("rich-img--broken");
+        const fallback = document.createElement("div");
+        fallback.className = "rich-img-fallback";
+        fallback.textContent = "图片加载失败：";
+        const link = document.createElement("a");
+        link.textContent = src;
+        link.href = src;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        fallback.appendChild(link);
+        try {
+          img.insertAdjacentElement("afterend", fallback);
+        } catch (_) {
+          // ignore
+        }
+      };
+
+      img.addEventListener("load", onLoad, { once: true });
+      img.addEventListener("error", onError, { once: true });
+
+      if (img.complete) {
+        if (img.naturalWidth > 0) {
+          onLoad();
+        } else {
+          onError();
         }
       }
     });
-  });
+  };
 
-  doc.querySelectorAll("a[href]").forEach((a) => {
-    const href = a.getAttribute("href") || "";
-    try {
-      a.setAttribute("href", new URL(href, HTML_BASE_URL).href);
-      a.setAttribute("target", "_blank");
-      a.setAttribute("rel", "noreferrer");
-    } catch (_) {
-      a.removeAttribute("href");
+  const buildFromPending = () => {
+    const sourceHtml = String(pendingHtml || "").trim();
+    const includeImages = Boolean(done);
+    if (!sourceHtml || (sourceHtml === lastBuiltHtml && includeImages === lastBuiltIncludeImages) || !container) {
+      return;
     }
-  });
 
-  doc.querySelectorAll("img[src]").forEach((img) => {
-    const src = img.getAttribute("src") || "";
-    try {
-      img.setAttribute("src", new URL(src, HTML_BASE_URL).href);
-      img.setAttribute("loading", "lazy");
-    } catch (_) {
-      img.removeAttribute("src");
-    }
-    if (!img.getAttribute("alt")) {
-      img.setAttribute("alt", "");
-    }
-  });
+    const parser = new DOMParser();
+    const documentHtml = /<html[\s>]/i.test(sourceHtml)
+      ? sourceHtml
+      : `<!doctype html><html><head></head><body>${sourceHtml}</body></html>`;
+    const doc = parser.parseFromString(documentHtml, "text/html");
 
-  return (doc.body?.innerHTML || "").trim();
+    const fragment = document.createDocumentFragment();
+    const nextSegments = [];
+    Array.from(doc.body?.childNodes || []).forEach((child) => {
+      const cloned = cloneRichNode(child, nextSegments);
+      if (cloned) {
+        fragment.appendChild(cloned);
+      }
+    });
+
+    container.replaceChildren(fragment);
+    wireRichContent();
+
+    segments = nextSegments;
+    totalLen = segments.reduce((acc, seg) => acc + seg.fullText.length, 0);
+    typedLen = Math.max(0, Math.min(typedLen, totalLen));
+
+    let remaining = typedLen;
+    segmentIndex = 0;
+    segmentOffset = 0;
+    for (let i = 0; i < segments.length; i += 1) {
+      const seg = segments[i];
+      const take = Math.max(0, Math.min(remaining, seg.fullText.length));
+      seg.node.nodeValue = seg.fullText.slice(0, take);
+      remaining -= take;
+      if (take < seg.fullText.length) {
+        segmentIndex = i;
+        segmentOffset = take;
+        break;
+      }
+      segmentIndex = i + 1;
+      segmentOffset = 0;
+    }
+
+    lastBuiltHtml = sourceHtml;
+    lastBuiltIncludeImages = includeImages;
+    if (!startedDisplay) {
+      startedDisplay = true;
+      onStart?.();
+    }
+
+    if (done && typedLen >= totalLen) {
+      stop();
+      onDone?.();
+    }
+  };
+
+  const typeOneChar = () => {
+    if (typedLen >= totalLen) {
+      return;
+    }
+
+    while (segmentIndex < segments.length) {
+      const seg = segments[segmentIndex];
+      if (segmentOffset < seg.fullText.length) {
+        seg.node.nodeValue += seg.fullText[segmentOffset];
+        segmentOffset += 1;
+        typedLen += 1;
+        return;
+      }
+      segmentIndex += 1;
+      segmentOffset = 0;
+    }
+  };
+
+  const loop = (timestamp) => {
+    if (!running) {
+      return;
+    }
+    if (!container || !container.isConnected) {
+      stop();
+      return;
+    }
+
+    if (!lastTickAt) {
+      lastTickAt = timestamp;
+    }
+
+    if (timestamp - lastTickAt >= Math.max(8, Number(tickMs) || 20)) {
+      lastTickAt = timestamp;
+      if (typedLen < totalLen) {
+        typeOneChar();
+        onProgress?.();
+      } else if (done) {
+        stop();
+        onDone?.();
+        return;
+      }
+    }
+
+    raf = window.requestAnimationFrame(loop);
+  };
+
+  const ensureRunning = () => {
+    if (running) {
+      return;
+    }
+    running = true;
+    raf = window.requestAnimationFrame(loop);
+  };
+
+  return {
+    setTargetHtml(nextHtml) {
+      const normalized = String(nextHtml || "").trim();
+      if (!normalized) {
+        return;
+      }
+      pendingHtml = normalized;
+      scheduleBuild();
+      ensureRunning();
+    },
+    markDone(nextFinalHtml) {
+      const normalized = String(nextFinalHtml || "").trim();
+      if (normalized) {
+        pendingHtml = normalized;
+        scheduleBuild();
+      }
+      done = true;
+      ensureRunning();
+    },
+    stop,
+  };
 }
 
 async function submitComposerQuestion() {
@@ -322,27 +717,24 @@ async function submitComposerQuestion() {
 
 async function askQuestion(question) {
   appendUserMessage(question);
-  const view = createAssistantMessage({ placeholder: "正在生成回答..." });
+  const view = createAssistantMessage();
+  if (!view) {
+    return;
+  }
   syncUiState();
-  scrollChatToBottom();
+  scrollChatToBottom({ force: true });
 
   setBusy(true);
-  setStatus("busy", "生成中...");
-
-  const payload = { question };
-  if (state.selectedModel) {
-    payload.model = state.selectedModel;
-  }
+  setStatus("busy", "整理中...");
 
   let streamAnswerHtml = "";
-  let streamThinkingText = "";
   let donePayload = null;
 
   try {
     const resp = await fetch("/api/ask-stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ question }),
     });
 
     if (!resp.ok) {
@@ -357,8 +749,6 @@ async function askQuestion(question) {
 
     await readJsonLines(resp, (event) => {
       if (event.type === "thinking_delta") {
-        streamThinkingText = typeof event.text === "string" ? event.text : `${streamThinkingText}${event.delta || ""}`;
-        // Do not display thinking; only reflect activity in status.
         setStatus("busy", streamAnswerHtml ? "生成中..." : "整理中...");
         return;
       }
@@ -369,7 +759,7 @@ async function askQuestion(question) {
           return;
         }
         streamAnswerHtml = html;
-        setAssistantHtml(view.body, streamAnswerHtml);
+        view.typer.setTargetHtml(html);
         scrollChatToBottom();
         return;
       }
@@ -387,24 +777,25 @@ async function askQuestion(question) {
       throw new Error("STREAM_ENDED_WITHOUT_DONE");
     }
 
-    if (donePayload.ok) {
-      const finalHtml = String(donePayload.answer_html || streamAnswerHtml || "").trim();
-      if (finalHtml) {
-        setAssistantHtml(view.body, finalHtml);
-      } else {
-        setAssistantText(view.body, String(donePayload.answer_text || "未获取到可展示的回答。"));
-      }
-      state.lastHealth = null;
-      await refreshHealth();
-      return;
+    if (!donePayload.ok) {
+      throw new Error(formatApiError(donePayload));
     }
 
-    throw new Error(formatApiError(donePayload));
+    const finalHtml = String(donePayload.answer_html || streamAnswerHtml || "").trim();
+    const answerText = String(donePayload.answer_text || "").trim();
+    if (finalHtml) {
+      view.typer.setTargetHtml(finalHtml);
+      view.typer.markDone(finalHtml);
+    } else if (answerText) {
+      view.typer.setTargetHtml(plainTextToHtml(answerText));
+      view.typer.markDone();
+    } else {
+      view.typer.markDone();
+    }
+    await refreshHealth();
   } catch (error) {
     setStatus("error", "请求失败");
-    const message = error instanceof Error ? error.message : String(error || "请求失败");
-    setAssistantText(view.body, message);
-    return;
+    view.setError(error instanceof Error ? error.message : String(error || "请求失败"));
   } finally {
     setBusy(false);
     syncUiState();
@@ -484,8 +875,7 @@ async function loadUiConfig() {
   }
 
   setPollingConfig(data);
-  setKbLabel(String(data.kb_label || "").trim() || "知识库");
-  applyModelCatalog(data);
+  setKbLabel(typeof data.kb_label === "string" ? data.kb_label : DEFAULT_KB_LABEL);
   return data;
 }
 
@@ -497,20 +887,15 @@ async function refreshHealth() {
       throw new Error("读取健康状态失败");
     }
     nextPayload = data;
-    applyHealthPayload(data);
+    setHealthStatus(data);
     return data;
   } catch (_) {
     nextPayload = { ok: false, status: "error", error_code: "REQUEST_FAILED", error_message: "health failed" };
-    applyHealthPayload(nextPayload);
+    setHealthStatus(nextPayload);
     return null;
   } finally {
     scheduleHealthRefresh(getHealthRefreshDelay(nextPayload));
   }
-}
-
-function applyHealthPayload(payload) {
-  state.lastHealth = payload;
-  setHealthStatus(payload);
 }
 
 function setHealthStatus(payload) {
@@ -537,50 +922,6 @@ function setHealthStatus(payload) {
   setStatus("error", "连接异常");
 }
 
-function applyModelCatalog(payload = {}) {
-  const options = Array.isArray(payload.model_options)
-    ? payload.model_options
-        .map((option) => ({
-          value: String(option?.value || option?.label || "").trim(),
-          label: String(option?.label || option?.value || "").trim(),
-          selected: Boolean(option?.selected),
-        }))
-        .filter((option) => option.value && option.label)
-    : [];
-
-  state.modelOptions = options;
-
-  if (!dom.modelMenuList) {
-    return;
-  }
-
-  dom.modelMenuList.innerHTML = "";
-
-  if (!options.length) {
-    state.selectedModel = "";
-    syncUiState();
-    return;
-  }
-
-  const currentModel = String(payload.current_model || "").trim();
-  const selectedOption =
-    options.find((opt) => opt.value === currentModel || opt.label === currentModel) ||
-    options.find((opt) => opt.selected) ||
-    options[0];
-
-  state.selectedModel = selectedOption?.value || "";
-
-  options.forEach((opt) => {
-    const item = document.createElement("option");
-    item.value = opt.value;
-    item.textContent = opt.label;
-    dom.modelMenuList.appendChild(item);
-  });
-
-  dom.modelMenuList.value = state.selectedModel;
-  syncUiState();
-}
-
 function formatApiError(payload) {
   const code = payload?.error_code || "REQUEST_FAILED";
   if (code === "LOGIN_REQUIRED") {
@@ -601,4 +942,3 @@ function formatApiError(payload) {
   const message = payload?.error_message || "请求失败";
   return `${code}: ${message}`;
 }
-
