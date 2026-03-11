@@ -1,14 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 import json
-import queue
 import threading
 import webbrowser
 from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import PurePosixPath
-from typing import Any, Iterator
+from typing import Any, AsyncIterator
 
 import uvicorn
 from fastapi import Body, FastAPI, Request
@@ -29,8 +29,6 @@ UI_ASSET_NAMES = (
     "app.css",
     "app.js",
     "app-main.js",
-    "app-render.js",
-    "app-view.js",
 )
 ASSET_MEDIA_TYPES = {
     ".css": "text/css",
@@ -212,55 +210,82 @@ def _acquire_ui_worker(
     )
 
 
-def _build_stream(request_data: UIAskRequest, lease: UIWorkerLease) -> Iterator[str]:
-    events: queue.Queue[dict[str, Any] | object] = queue.Queue()
+async def _build_stream(request: Request, request_data: UIAskRequest, lease: UIWorkerLease) -> AsyncIterator[str]:
+    """Stream NDJSON events with a single background thread.
+
+    FastAPI/Starlette will consume async iterables in the event loop directly,
+    which avoids the extra "iterate sync generator in threadpool" worker thread.
+    """
+
+    loop = asyncio.get_running_loop()
+    events: asyncio.Queue[dict[str, Any] | object] = asyncio.Queue()
     done_marker = object()
 
-    def runner() -> None:
-        try:
-            events.put({"type": "start", "question": request_data.question})
+    def put(item: dict[str, Any] | object) -> None:
+        loop.call_soon_threadsafe(events.put_nowait, item)
 
-            def on_update(*args: Any, **kwargs: Any) -> None:
-                update = _normalize_stream_update(*args, **kwargs)
-                phase = update["phase"]
-                if phase == "thinking":
-                    if not update["delta"]:
-                        return
-                    events.put({"type": "thinking_delta", "delta": update["delta"], "text": update["text"]})
-                    return
-                if phase != "answer_html":
-                    return
-                html_snapshot = clean_answer_html(update["html"])
-                if not html_snapshot:
-                    return
-                events.put({"type": "answer_html", "html": html_snapshot})
+    yield json.dumps({"type": "start", "question": request_data.question}, ensure_ascii=False) + "\n"
 
-            response = lease.worker.service.ask_with_updates(
-                question=request_data.question,
-                model=request_data.model,
-                on_update=on_update,
-            )
-            lease.release(response=response)
-            events.put({"type": "done", "response": _ui_response_payload(response)})
-        except Exception as exc:
-            lease.release(exc=exc)
-            events.put(
-                {
-                    "type": "error",
-                    "error_code": "CAPTURE_FAILED",
-                    "error_message": str(exc),
-                }
-            )
-        finally:
-            events.put(done_marker)
+    def on_update(*args: Any, **kwargs: Any) -> None:
+        update = _normalize_stream_update(*args, **kwargs)
+        phase = update["phase"]
+        if phase == "thinking":
+            if not update["delta"]:
+                return
+            put({"type": "thinking_delta", "delta": update["delta"], "text": update["text"]})
+            return
+        if phase != "answer_html":
+            return
+        html_snapshot = clean_answer_html(update["html"])
+        if not html_snapshot:
+            return
+        put({"type": "answer_html", "html": html_snapshot})
 
-    threading.Thread(target=runner, daemon=True).start()
+    ask_future = getattr(lease.worker.service, "ask_with_updates_future", None)
+    if callable(ask_future):
+        future = ask_future(
+            question=request_data.question,
+            model=request_data.model,
+            on_update=on_update,
+        )
+
+        def on_done(done) -> None:
+            try:
+                response = done.result()
+                lease.release(response=response)
+                put({"type": "done", "response": _ui_response_payload(response)})
+            except Exception as exc:
+                lease.release(exc=exc)
+                put({"type": "error", "error_code": "CAPTURE_FAILED", "error_message": str(exc)})
+            finally:
+                put(done_marker)
+
+        future.add_done_callback(on_done)
+    else:
+        def runner() -> None:
+            try:
+                response = lease.worker.service.ask_with_updates(
+                    question=request_data.question,
+                    model=request_data.model,
+                    on_update=on_update,
+                )
+                lease.release(response=response)
+                put({"type": "done", "response": _ui_response_payload(response)})
+            except Exception as exc:
+                lease.release(exc=exc)
+                put({"type": "error", "error_code": "CAPTURE_FAILED", "error_message": str(exc)})
+            finally:
+                put(done_marker)
+
+        threading.Thread(target=runner, daemon=True).start()
 
     while True:
-        item = events.get()
+        item = await events.get()
         if item is done_marker:
             break
         yield json.dumps(item, ensure_ascii=False) + "\n"
+        if await request.is_disconnected():
+            break
 
 
 def create_chat_ui_app(
@@ -284,7 +309,12 @@ def create_chat_ui_app(
         refresh = getattr(pool, "refresh_in_background", None)
         if callable(refresh):
             refresh()
-        yield
+        try:
+            yield
+        finally:
+            close_pool = getattr(pool, "close", None)
+            if callable(close_pool):
+                close_pool()
 
     app = FastAPI(lifespan=lifespan)
     app.state.settings = settings
@@ -354,7 +384,7 @@ def create_chat_ui_app(
             return _json_error("CAPTURE_FAILED", str(exc), status_code=500)
 
     @app.post("/api/ask-stream")
-    def api_ask_stream(request: Request, payload: dict[str, Any] | None = Body(default=None)) -> Response:
+    async def api_ask_stream(request: Request, payload: dict[str, Any] | None = Body(default=None)) -> Response:
         request_data, lease, error_response = _acquire_ui_worker(
             request,
             payload,
@@ -366,7 +396,7 @@ def create_chat_ui_app(
             return error_response
 
         return StreamingResponse(
-            _build_stream(request_data=request_data, lease=lease),
+            _build_stream(request=request, request_data=request_data, lease=lease),
             media_type="application/x-ndjson",
             headers={"Cache-Control": "no-store"},
         )

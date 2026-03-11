@@ -12,11 +12,7 @@
     <header class="app-header">
       <div class="app-header__identity">
         <span class="brand-mark" aria-hidden="true"></span>
-        <div class="app-header__copy">
-          <span class="app-header__eyebrow">财经问答</span>
-          <h1 id="kbLabel" class="app-header__title">财经知识库</h1>
-          <p class="app-header__subtitle">实时富文本研判与资料整合</p>
-        </div>
+        <h1 id="kbLabel" class="app-header__title">财经知识库</h1>
       </div>
 
       <div id="statusWrap" class="status status--ready" role="status" aria-live="polite" aria-atomic="true">
@@ -26,78 +22,17 @@
     </header>
 
     <main class="workspace-main">
-      <div id="conversationViewport" class="conversation-viewport">
-        <section id="emptyState" class="empty-state" aria-live="polite">
-          <div class="empty-state__hero">
-            <span class="empty-state__eyebrow">市场脉络 · 公司解读 · 政策影响</span>
-            <div class="empty-state__mark" aria-hidden="true"></div>
-            <div class="empty-state__copy">
-              <h2 class="empty-state__title">开始提问</h2>
-              <p id="heroDescription" class="empty-state__text">围绕市场、公司或政策直接提问，系统会把答案整理成清晰的富文本结构，方便快速阅读与继续追问。</p>
-            </div>
-            <div class="empty-state__metrics" aria-label="知识库能力">
-              <span class="metric-pill">实时问答</span>
-              <span class="metric-pill">结构化输出</span>
-              <span class="metric-pill">支持图片与表格</span>
-            </div>
-            <div id="startupPanel" class="startup-panel" hidden>
-              <div class="startup-panel__row">
-                <span id="startupPhase" class="startup-panel__phase"></span>
-                <span id="startupCount" class="startup-panel__count"></span>
-              </div>
-              <div class="startup-panel__track" aria-hidden="true">
-                <span id="startupBar" class="startup-panel__bar"></span>
-              </div>
-              <p id="startupHint" class="startup-panel__hint"></p>
-            </div>
-          </div>
-
-          <aside class="empty-state__aside" aria-label="推荐问题">
-            <section class="prompt-panel">
-              <div class="prompt-panel__header">
-                <span class="prompt-panel__eyebrow">推荐问题</span>
-                <h3 class="prompt-panel__title">可以这样开始</h3>
-                <p class="prompt-panel__text">点击任意问题卡片即可填充到输入框，适合快速进入状态。</p>
-              </div>
-
-              <div class="prompt-panel__grid">
-                <button type="button" class="prompt-card" data-question="请用三段话总结今天市场的主线、风险和值得继续跟踪的板块。">
-                  <span class="prompt-card__kicker">市场速览</span>
-                  <span class="prompt-card__title">用三段话总结今天市场的主线、风险和值得跟踪的板块</span>
-                  <span class="prompt-card__meta">适合开盘前或收盘后快速阅读</span>
-                </button>
-
-                <button type="button" class="prompt-card" data-question="请梳理这家公司最新财报里的关键变化、亮点和潜在风险。">
-                  <span class="prompt-card__kicker">公司解读</span>
-                  <span class="prompt-card__title">梳理一家公司最新财报里的关键变化、亮点和潜在风险</span>
-                  <span class="prompt-card__meta">适合快速理解基本面变化</span>
-                </button>
-
-                <button type="button" class="prompt-card" data-question="请解释本周重要政策对A股、港股和债券市场可能带来的影响。">
-                  <span class="prompt-card__kicker">政策影响</span>
-                  <span class="prompt-card__title">解释本周重要政策对不同市场可能带来的影响</span>
-                  <span class="prompt-card__meta">适合做跨市场联动观察</span>
-                </button>
-              </div>
-
-              <p class="prompt-panel__footnote">建议一次聚焦一个主题，这样得到的结构会更清晰。</p>
-            </section>
-          </aside>
-        </section>
-
+      <section id="conversationViewport" class="conversation-viewport" aria-label="对话">
+        <div id="emptyState" class="empty-state" aria-live="polite">
+          <h2 class="empty-state__title">开始提问</h2>
+          <p class="empty-state__text">输入你的问题并发送，回答会以富文本形式呈现。</p>
+        </div>
         <div id="chat" class="chat-log" role="log" aria-live="polite"></div>
-      </div>
-
-      <button id="jumpToLatestBtn" class="jump-to-latest" type="button" hidden>回到底部</button>
+      </section>
 
       <form id="composer" class="composer">
         <div class="composer-shell">
           <div class="composer-frame">
-            <div class="composer-topline">
-              <span class="composer-badge">富文本回答</span>
-              <span id="composerHint" class="composer-hint" aria-live="polite">点击上方示例问题，或直接输入你的问题</span>
-            </div>
-
             <label class="sr-only" for="question">输入问题</label>
             <textarea
               id="question"
@@ -108,14 +43,6 @@
 
             <div class="composer-controls">
               <div class="composer-actions">
-                <div id="modelMenu" class="model-menu" hidden>
-                  <button id="modelMenuTrigger" class="model-menu__trigger" type="button" aria-haspopup="listbox" aria-expanded="false">
-                    <span id="modelMenuLabel">选择模型</span>
-                    <span class="model-menu__caret" aria-hidden="true">▾</span>
-                  </button>
-                  <div id="modelMenuList" class="model-menu__list" role="listbox" hidden></div>
-                </div>
-
                 <button id="newConversationBtn" class="secondary-button" type="button" hidden>新建对话</button>
               </div>
 

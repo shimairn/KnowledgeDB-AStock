@@ -9,7 +9,7 @@ from ima_bridge.config import Settings, get_settings
 from ima_bridge.driver_protocol import DriverModelCatalog, DriverModelOption
 from ima_bridge.profile_sync import sync_profile_state
 from ima_bridge.schemas import AskResponse, HealthResponse
-from ima_bridge.service import IMAAskService
+from ima_bridge.web_worker_service import WebWorkerService
 
 WorkerStatus = Literal["warming", "ready", "busy", "login_required", "error"]
 
@@ -18,7 +18,7 @@ WorkerStatus = Literal["warming", "ready", "busy", "login_required", "error"]
 class WorkerSlot:
     worker_id: str
     settings: Settings
-    service: IMAAskService
+    service: object
     status: WorkerStatus = "warming"
     last_error_code: str | None = None
     last_error_message: str | None = None
@@ -51,11 +51,11 @@ class WorkerPoolManager:
         self,
         template_settings: Settings,
         worker_count: int,
-        service_factory: Callable[[Settings], IMAAskService] | None = None,
+        service_factory: Callable[[Settings], object] | None = None,
     ) -> None:
         self.template_settings = template_settings
         self.worker_count = max(1, worker_count)
-        self._service_factory = service_factory or (lambda settings: IMAAskService(settings=settings))
+        self._service_factory = service_factory or (lambda settings: WebWorkerService(settings=settings))
         self._lock = Lock()
         self._cached_model_catalog = self._fallback_model_catalog()
         self._refresh_in_progress = False
@@ -237,6 +237,15 @@ class WorkerPoolManager:
 
     def iter_login_services(self) -> list[WorkerSlot]:
         return list(self._workers)
+
+    def close(self) -> None:
+        for worker in self._workers:
+            close_service = getattr(worker.service, "close", None)
+            if callable(close_service):
+                try:
+                    close_service()
+                except Exception:
+                    continue
 
     def seed_profiles_from(self, source_settings: Settings | None = None) -> int:
         source = source_settings or self.template_settings

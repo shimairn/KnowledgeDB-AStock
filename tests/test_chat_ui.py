@@ -185,11 +185,8 @@ def test_chat_ui_serves_static_index_and_assets(tmp_path, monkeypatch):
     assert 'id="emptyState"' in index_response.text
     assert 'id="newConversationBtn"' in index_response.text
     assert 'id="conversationViewport"' in index_response.text
-    assert 'id="jumpToLatestBtn"' in index_response.text
     assert 'id="modelMenu"' in index_response.text
     assert 'id="modelMenuList"' in index_response.text
-    assert 'id="startupPanel"' in index_response.text
-    assert 'id="startupBar"' in index_response.text
     assert 'id="appSidebar"' not in index_response.text
     assert 'id="sidebarToggleBtn"' not in index_response.text
     assert 'id="sourceDrawer"' not in index_response.text
@@ -200,39 +197,20 @@ def test_chat_ui_serves_static_index_and_assets(tmp_path, monkeypatch):
     assert "<header" in index_response.text
     assert 'id="modelSelect"' not in index_response.text
     assert 'id="clearBtn"' not in index_response.text
-    assert 'id="questionHint"' not in index_response.text
     assert 'id="modelMenu"' in composer_markup
     assert 'id="sendBtn"' in composer_markup
     assert 'id="newConversationBtn"' in composer_markup
 
     assert js_response.status_code == 200
     assert main_response.status_code == 200
-    assert render_response.status_code == 200
-    assert view_response.status_code == 200
+    assert render_response.status_code == 404
+    assert view_response.status_code == 404
     assert "/assets/app-main.js" in js_response.text
-    assert "questionMeta" not in main_response.text
-    assert "sidebarToggleBtn" not in main_response.text
-    assert "sourceDrawer" not in main_response.text
     assert "modelMenu" in main_response.text
-    assert "jumpToLatestBtn" in main_response.text
-    assert "hasPendingConversationUpdate" in main_response.text
     assert "scheduleHealthRefresh" in main_response.text
-    assert "applyHealthPayload" in main_response.text
-    assert "createMessageRenderer" in main_response.text
-    assert "prepareAnswerRender" in render_response.text
-    assert "ANSWER_SURFACE_STYLE_TEXT" in render_response.text
-    assert "source-chip" not in view_response.text
-    assert "stream-status" in view_response.text
-    assert "reference-list" not in view_response.text
-    assert "source-list" not in view_response.text
-    assert "bubble-extras" not in view_response.text
-    assert "message-label" not in view_response.text
-    assert "detail-card" not in view_response.text
-    assert "answer-surface" in view_response.text
-    assert 'attachShadow({ mode: "open" })' in view_response.text
-    assert "frame.srcdoc" not in view_response.text
-    assert "answer-frame" not in view_response.text
-    assert "queueMainText" not in view_response.text
+    assert "sanitizeHtml" in main_response.text
+    assert "createMessageRenderer" not in main_response.text
+    assert "prepareAnswerRender" not in main_response.text
 
 
 def test_chat_ui_ui_config_and_health_are_anonymous(tmp_path, monkeypatch):

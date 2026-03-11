@@ -22,10 +22,8 @@ bootstrap().catch((error) => {
     const row = document.createElement("article");
     row.className = "msg assistant";
     row.innerHTML = [
-      '<div class="message-column">',
-      '  <div class="message-card message-card--assistant">',
-      `    <div class="message-rich rich-content"><p>${escapeHtml(error instanceof Error ? error.message : error)}</p></div>`,
-      "  </div>",
+      '<div class="bubble bubble--assistant">',
+      `  <div class="bubble__text">${escapeHtml(error instanceof Error ? error.message : error)}</div>`,
       "</div>",
     ].join("\n");
     chat.appendChild(row);
