@@ -382,6 +382,24 @@ function createRichTypewriter(container, { tickMs, onStart, onProgress, onDone }
   let lastBuildAt = 0;
   let startedDisplay = false;
 
+  // During streaming, some models temporarily emit empty/placeholder list items
+  // (e.g. "2." with blank bullets). Hide those nodes until they have real content.
+  const shouldHidePlaceholder = (el) => {
+    if (!el || el.nodeType !== Node.ELEMENT_NODE) {
+      return false;
+    }
+    const tag = String(el.tagName || "").toLowerCase();
+    if (tag !== "li") {
+      return false;
+    }
+    const text = String(el.textContent || "").replace(/\s+/g, " ").trim();
+    if (!text) {
+      return true;
+    }
+    // Examples to hide: "1.", "2.", "-", "•", "*".
+    return /^(?:\d+[.)]?|[-*•])$/.test(text);
+  };
+
   const stop = () => {
     running = false;
     if (raf) {
@@ -609,6 +627,18 @@ function createRichTypewriter(container, { tickMs, onStart, onProgress, onDone }
     });
 
     container.replaceChildren(fragment);
+
+    // Hide placeholder list items during typing (avoid ugly blank bullets like in the screenshot).
+    if (!done) {
+      container.querySelectorAll("li").forEach((li) => {
+        if (shouldHidePlaceholder(li)) {
+          li.classList.add("typing-hidden");
+        }
+      });
+    } else {
+      container.querySelectorAll("li.typing-hidden").forEach((li) => li.classList.remove("typing-hidden"));
+    }
+
     wireRichContent();
 
     segments = nextSegments;

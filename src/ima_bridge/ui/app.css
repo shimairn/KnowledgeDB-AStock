@@ -42,6 +42,10 @@ body {
   display: none !important;
 }
 
+.typing-hidden {
+  display: none !important;
+}
+
 button,
 textarea,
 select,
