@@ -13,10 +13,12 @@
 
 ## 安装
 
+> 需要 **Python 3.11**（项目约束：`>=3.11,<3.12`）。推荐直接使用本仓库的 conda 环境 `ima`。
+
 ```powershell
 conda env create -f environment.yml
 conda activate ima
-python -m pip install -e .[dev]
+python -m pip install -e ".[dev]"
 python -m playwright install chromium
 ```
 
@@ -92,7 +94,12 @@ from ima_bridge import IMAAskService
 统一在 `ima` 环境执行：
 
 ```powershell
-conda run --no-capture-output -n ima python -m pytest -q
+# 推荐：避免中文/emoji 输出导致的编码问题
+PYTHONUTF8=1 PYTHONIOENCODING=utf-8 conda run --no-capture-output -n ima python -m pytest -q
+
+# 如果你更习惯先 activate 环境：
+# conda activate ima
+# PYTHONUTF8=1 PYTHONIOENCODING=utf-8 python -m pytest -q
 ```
 
 

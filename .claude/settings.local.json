@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pytest -q)",
+      "Bash(python -m pytest -q)",
+      "Bash(python -c \"import sys,site,platform; print\\(sys.executable\\); print\\(sys.version\\); print\\(site.getsitepackages\\(\\)\\); print\\(platform.platform\\(\\)\\)\")",
+      "Bash(conda info:*)",
+      "Bash(python -c \"import sys; print\\(sys.executable\\); print\\(sys.version\\)\")"
+    ]
+  }
+}

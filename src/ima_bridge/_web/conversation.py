@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 from typing import Callable
 
@@ -7,7 +8,7 @@ from playwright.sync_api import Locator, Page
 
 from ima_bridge.config import Settings
 from ima_bridge.driver_protocol import DriverModelCatalog, DriverModelOption
-from ima_bridge.errors import AskTimeoutError, ConfigMismatchError
+from ima_bridge.errors import AskCancelledError, AskTimeoutError, ConfigMismatchError
 from ima_bridge.probes import (
     COMPOSER_SELECTORS,
     LOADING_HINTS,
@@ -282,6 +283,7 @@ class WebConversationRunner:
         before_text: str,
         question: str,
         on_update: Callable[..., None] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> tuple[str, str]:
         deadline = time.monotonic() + self.settings.ask_timeout_seconds
         stable_rounds = 0
@@ -296,6 +298,9 @@ class WebConversationRunner:
         latest_content = ExtractedAIContent()
 
         while time.monotonic() < deadline:
+            if cancel_event is not None and cancel_event.is_set():
+                raise AskCancelledError("Client disconnected")
+
             latest_text = self.session.body_text(page)
             latest_html = self.session.body_html(page)
             latest_content = self.extractor.extract_latest_ai_content(page) or ExtractedAIContent()

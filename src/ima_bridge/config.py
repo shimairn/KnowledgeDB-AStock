@@ -49,6 +49,11 @@ class Settings:
     output_gc_retention_hours: float = field(default_factory=lambda: float(os.getenv("IMA_OUTPUT_GC_RETENTION_HOURS", "24")))
     output_gc_include_profiles: bool = field(default_factory=lambda: os.getenv("IMA_OUTPUT_GC_INCLUDE_PROFILES", "0") == "1")
 
+    web_context_max_requests: int = field(default_factory=lambda: int(os.getenv("IMA_WEB_CONTEXT_MAX_REQUESTS", "60")))
+    web_context_max_age_seconds: float = field(default_factory=lambda: float(os.getenv("IMA_WEB_CONTEXT_MAX_AGE_SECONDS", "3600")))
+    web_context_max_pages: int = field(default_factory=lambda: int(os.getenv("IMA_WEB_CONTEXT_MAX_PAGES", "2")))
+    web_vector_snapshot_max: int = field(default_factory=lambda: int(os.getenv("IMA_WEB_VECTOR_SNAPSHOT_MAX", "6")))
+
     @property
     def cdp_endpoint(self) -> str:
         return f"http://127.0.0.1:{self.app_cdp_port}"

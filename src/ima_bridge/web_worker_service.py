@@ -17,7 +17,7 @@ from ima_bridge.driver_protocol import (
     DriverLoginStatus,
     DriverModelCatalog,
 )
-from ima_bridge.errors import CaptureFailedError
+from ima_bridge.errors import AskCancelledError, CaptureFailedError
 from ima_bridge.service import IMAAskService
 from ima_bridge.ui_media import download_images_to_local, inject_placeholder_img_sources
 from ima_bridge.web_driver import WebAskDriver
@@ -120,9 +120,10 @@ class PersistentWebAskDriver(AskDriver):
         question: str,
         model: str | None = None,
         on_update: Callable[..., None] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> DriverAskResult:
         self._ensure_context(headless=self.settings.web_headless)
-        return self._ask_in_context(question=question, model=model, on_update=on_update)
+        return self._ask_in_context(question=question, model=model, on_update=on_update, cancel_event=cancel_event)
 
     def _ensure_playwright(self) -> Playwright:
         if self._playwright is not None:
@@ -134,9 +135,38 @@ class PersistentWebAskDriver(AskDriver):
         context = self._context
         if context is not None and self._context_headless == headless:
             try:
-                _ = list(context.pages)
-                return context
+                pages = list(context.pages)
             except Exception:
+                self._close_context()
+            else:
+                now = time.monotonic()
+                should_recycle = False
+                reason = ""
+
+                if self._request_count >= max(1, int(getattr(self.settings, "web_context_max_requests", 60))):
+                    should_recycle = True
+                    reason = "max_requests"
+                elif now - float(self._last_context_at or 0.0) >= max(
+                    1.0, float(getattr(self.settings, "web_context_max_age_seconds", 3600.0))
+                ):
+                    should_recycle = True
+                    reason = "max_age"
+                else:
+                    max_pages = max(1, int(getattr(self.settings, "web_context_max_pages", 2)))
+                    if len(pages) > max_pages:
+                        should_recycle = True
+                        reason = "max_pages"
+
+                if not should_recycle:
+                    return context
+
+                logger.info(
+                    "recycling web context: reason=%s instance=%s requests=%s pages=%s",
+                    reason,
+                    self.settings.instance,
+                    self._request_count,
+                    len(pages),
+                )
                 self._close_context()
 
         self._close_context()
@@ -146,6 +176,7 @@ class PersistentWebAskDriver(AskDriver):
         self._context = context
         self._context_headless = headless
         self._last_context_at = time.monotonic()
+        self._request_count = 0
         return context
 
     def _close_context(self) -> None:
@@ -227,6 +258,7 @@ class PersistentWebAskDriver(AskDriver):
         question: str,
         model: str | None,
         on_update: Callable[..., None] | None,
+        cancel_event: threading.Event | None,
     ) -> DriverAskResult:
         page = self._safe_prepare_chat_page()
         context = page.context
@@ -242,6 +274,7 @@ class PersistentWebAskDriver(AskDriver):
             before_text,
             question=question,
             on_update=on_update,
+            cancel_event=cancel_event,
         )
 
         latest_block = self.web_driver.answer_extractor.extract_latest_ai_block(page)
@@ -253,6 +286,9 @@ class PersistentWebAskDriver(AskDriver):
                 raise CaptureFailedError("Answer text not detected after completion")
             answer_html = after_html if after_html != before_html else ""
             thinking_text = self.web_driver.answer_extractor.extract_latest_thinking_text(page)
+
+        if cancel_event is not None and cancel_event.is_set():
+            raise AskCancelledError("Client disconnected")
 
         references = self.web_driver.answer_extractor.extract_references(answer_text)
         screenshot = self.web_driver.answer_extractor.capture(page) if self.settings.capture_screenshot else None
@@ -270,6 +306,8 @@ class PersistentWebAskDriver(AskDriver):
                     url_prefix=f"/api/media/{self.settings.instance}",
                     max_images=16,
                     max_bytes=25 * 1024 * 1024,
+                    max_total_bytes=25 * 1024 * 1024,
+                    max_data_uri_chars=4 * 1024 * 1024,
                 )
                 if localized:
                     logger.info("localized images: count=%s instance=%s", len(localized), self.settings.instance)
@@ -299,7 +337,8 @@ class PersistentWebAskDriver(AskDriver):
                         if media_count:
                             stamp = timestamp_slug()
                             output_dir.mkdir(parents=True, exist_ok=True)
-                            for i in range(min(media_count, len(placeholders))):
+                            max_vectors = max(0, int(getattr(self.settings, "web_vector_snapshot_max", 6)))
+                            for i in range(min(media_count, len(placeholders), max_vectors)):
                                 placeholder_id = placeholders[i]
                                 filename = f"{placeholder_id}-{stamp}-{i}.png"
                                 path = output_dir / filename
@@ -377,13 +416,15 @@ class WebWorkerService:
         question: str,
         model: str | None = None,
         on_update: Callable[..., None] | None = None,
+        cancel_event: threading.Event | None = None,
     ):
-        return self._submit(self._service.ask_with_updates, question, model, on_update).result()
+        return self._submit(self._service.ask_with_updates, question, model, on_update, cancel_event).result()
 
     def ask_with_updates_future(
         self,
         question: str,
         model: str | None = None,
         on_update: Callable[..., None] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> Future:
-        return self._submit(self._service.ask_with_updates, question, model, on_update)
+        return self._submit(self._service.ask_with_updates, question, model, on_update, cancel_event)

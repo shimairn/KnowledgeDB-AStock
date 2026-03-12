@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+import inspect
 import json
 import mimetypes
 import socket
@@ -223,6 +224,8 @@ async def _build_stream(request: Request, request_data: UIAskRequest, lease: UIW
     loop = asyncio.get_running_loop()
     events: asyncio.Queue[dict[str, Any] | object] = asyncio.Queue()
     done_marker = object()
+    cancel_event = threading.Event()
+    stream_active: list[bool] = [True]
 
     def put(item: dict[str, Any] | object) -> None:
         loop.call_soon_threadsafe(events.put_nowait, item)
@@ -230,6 +233,8 @@ async def _build_stream(request: Request, request_data: UIAskRequest, lease: UIW
     yield json.dumps({"type": "start", "question": request_data.question}, ensure_ascii=False) + "\n"
 
     def on_update(*args: Any, **kwargs: Any) -> None:
+        if not stream_active[0] or cancel_event.is_set():
+            return
         update = _normalize_stream_update(*args, **kwargs)
         phase = update["phase"]
         if phase == "thinking":
@@ -246,11 +251,20 @@ async def _build_stream(request: Request, request_data: UIAskRequest, lease: UIW
 
     ask_future = getattr(lease.worker.service, "ask_with_updates_future", None)
     if callable(ask_future):
-        future = ask_future(
-            question=request_data.question,
-            model=request_data.model,
-            on_update=on_update,
-        )
+        future_params = inspect.signature(ask_future).parameters
+        if "cancel_event" in future_params:
+            future = ask_future(
+                question=request_data.question,
+                model=request_data.model,
+                on_update=on_update,
+                cancel_event=cancel_event,
+            )
+        else:
+            future = ask_future(
+                question=request_data.question,
+                model=request_data.model,
+                on_update=on_update,
+            )
 
         def on_done(done) -> None:
             try:
@@ -258,8 +272,12 @@ async def _build_stream(request: Request, request_data: UIAskRequest, lease: UIW
                 lease.release(response=response)
                 put({"type": "done", "response": _ui_response_payload(response)})
             except Exception as exc:
-                lease.release(exc=exc)
-                put({"type": "error", "error_code": "CAPTURE_FAILED", "error_message": str(exc)})
+                if cancel_event.is_set() and exc.__class__.__name__ == "AskCancelledError":
+                    # Cancellation is an expected outcome for client disconnect.
+                    lease.release()
+                else:
+                    lease.release(exc=exc)
+                    put({"type": "error", "error_code": "CAPTURE_FAILED", "error_message": str(exc)})
             finally:
                 put(done_marker)
 
@@ -267,27 +285,49 @@ async def _build_stream(request: Request, request_data: UIAskRequest, lease: UIW
     else:
         def runner() -> None:
             try:
-                response = lease.worker.service.ask_with_updates(
-                    question=request_data.question,
-                    model=request_data.model,
-                    on_update=on_update,
-                )
+                ask = getattr(lease.worker.service, "ask_with_updates", None)
+                if not callable(ask):
+                    raise RuntimeError("ask_with_updates not supported")
+
+                params = inspect.signature(ask).parameters
+                kwargs: dict[str, Any] = {
+                    "question": request_data.question,
+                    "model": request_data.model,
+                    "on_update": on_update,
+                }
+                if "cancel_event" in params:
+                    kwargs["cancel_event"] = cancel_event
+
+                response = ask(**kwargs)
                 lease.release(response=response)
                 put({"type": "done", "response": _ui_response_payload(response)})
             except Exception as exc:
-                lease.release(exc=exc)
-                put({"type": "error", "error_code": "CAPTURE_FAILED", "error_message": str(exc)})
+                if cancel_event.is_set() and exc.__class__.__name__ == "AskCancelledError":
+                    lease.release()
+                else:
+                    lease.release(exc=exc)
+                    put({"type": "error", "error_code": "CAPTURE_FAILED", "error_message": str(exc)})
             finally:
                 put(done_marker)
 
         threading.Thread(target=runner, daemon=True).start()
 
     while True:
-        item = await events.get()
+        try:
+            item = await asyncio.wait_for(events.get(), timeout=0.2)
+        except asyncio.TimeoutError:
+            if await request.is_disconnected():
+                stream_active[0] = False
+                cancel_event.set()
+                break
+            continue
+
         if item is done_marker:
             break
         yield json.dumps(item, ensure_ascii=False) + "\n"
         if await request.is_disconnected():
+            stream_active[0] = False
+            cancel_event.set()
             break
 
 
@@ -368,19 +408,29 @@ def create_chat_ui_app(
         summary = pool.summarize()
         model_catalog = pool.get_model_catalog()
         health = pool.health_payload()
-        return JSONResponse(
-            {
-                "ok": True,
-                "kb_label": _kb_label(settings),
-                "auth_required": False,
-                "driver_mode": settings.driver_mode,
-                "workers_total": summary.workers_total,
-                "health": health,
-                "startup_poll_interval_ms": STARTUP_POLL_INTERVAL_MS,
-                "steady_poll_interval_ms": STEADY_POLL_INTERVAL_MS,
-                **model_catalog.model_dump(),
-            }
-        )
+        profile_seed_report = None
+        try:
+            get_report = getattr(pool, "profile_seed_report", None)
+            if callable(get_report):
+                profile_seed_report = get_report()
+        except Exception:
+            profile_seed_report = None
+
+        payload = {
+            "ok": True,
+            "kb_label": _kb_label(settings),
+            "auth_required": False,
+            "driver_mode": settings.driver_mode,
+            "workers_total": summary.workers_total,
+            "health": health,
+            "startup_poll_interval_ms": STARTUP_POLL_INTERVAL_MS,
+            "steady_poll_interval_ms": STEADY_POLL_INTERVAL_MS,
+            **model_catalog.model_dump(),
+        }
+        if profile_seed_report is not None:
+            payload["profile_seed"] = profile_seed_report
+
+        return JSONResponse(payload)
 
     @app.get("/api/health.ok")
     def api_health_ok() -> JSONResponse:

@@ -12,7 +12,6 @@ from playwright.sync_api import BrowserContext, Page
 
 from ima_bridge.utils import get_logger
 
-
 logger = get_logger("ima_bridge.ui_media")
 
 _DATA_IMAGE_RE = re.compile(r"^data:(image/[\w.+-]+);base64,(.+)$", re.IGNORECASE | re.DOTALL)
@@ -266,6 +265,8 @@ def download_images_to_local(
     url_prefix: str,
     max_images: int = 12,
     max_bytes: int = 12 * 1024 * 1024,
+    max_total_bytes: int = 25 * 1024 * 1024,
+    max_data_uri_chars: int = 4 * 1024 * 1024,
 ) -> tuple[str, list[LocalizedMedia]]:
     source = str(answer_html or "").strip()
     if not source:
@@ -278,9 +279,12 @@ def download_images_to_local(
     output_dir.mkdir(parents=True, exist_ok=True)
     src_map: dict[str, str] = {}
     localized: list[LocalizedMedia] = []
+    total_bytes = 0
 
     for src in img_srcs[: max(0, int(max_images))]:
         raw = src.strip()
+        if max_total_bytes > 0 and total_bytes >= max_total_bytes:
+            break
         if not raw or raw in src_map:
             continue
         if raw.startswith("/api/") or raw.startswith("/assets/"):
@@ -288,13 +292,34 @@ def download_images_to_local(
             continue
 
         payload: tuple[bytes, str] | None = None
-        decoded = _decode_data_image(raw)
-        if decoded is not None:
-            payload = decoded
+
+        if raw.lower().startswith("data:"):
+            if max_data_uri_chars > 0 and len(raw) > max_data_uri_chars:
+                logger.info("skip data image: too large chars=%s", len(raw))
+                continue
+
+            match = _DATA_IMAGE_RE.match(raw.strip())
+            if match:
+                content_type = match.group(1).lower()
+                b64 = match.group(2)
+                estimated_bytes = max(0, (len(b64) * 3) // 4)
+                if max_bytes > 0 and estimated_bytes > max_bytes:
+                    logger.info("skip data image: too large est_bytes=%s", estimated_bytes)
+                    continue
+                if max_total_bytes > 0 and total_bytes + estimated_bytes > max_total_bytes:
+                    continue
+                try:
+                    body = base64.b64decode(b64, validate=False)
+                except Exception:
+                    continue
+                payload = (body, content_type)
+
         elif raw.lower().startswith("blob:"):
             payload = _fetch_blob_bytes(page, raw)
+
         elif raw.lower().startswith(("http://", "https://")):
             payload = _fetch_http_bytes(context, raw)
+
         else:
             try:
                 resolved = page.evaluate("url => new URL(url, location.href).href", raw)
@@ -311,8 +336,11 @@ def download_images_to_local(
             continue
         if not content_type or content_type == "application/octet-stream":
             content_type = _sniff_content_type(body)
+
         if len(body) > max(0, int(max_bytes)):
             logger.info("skip image: too large bytes=%s src=%s", len(body), raw[:200])
+            continue
+        if max_total_bytes > 0 and total_bytes + len(body) > max_total_bytes:
             continue
 
         ext = _ext_from_content_type(content_type)
@@ -323,6 +351,8 @@ def download_images_to_local(
                 path.write_bytes(body)
         except Exception:
             continue
+
+        total_bytes += len(body)
 
         local_url = f"{url_prefix.rstrip('/')}/{filename}"
         src_map[raw] = local_url
@@ -344,6 +374,7 @@ def download_images_to_local(
 
 def inject_placeholder_img_sources(answer_html: str, placeholder_map: dict[str, str]) -> str:
     """Rewrite <img data-ima-bridge-media="..."> to point at local sources."""
+
     source = str(answer_html or "").strip()
     if not source or not placeholder_map:
         return source

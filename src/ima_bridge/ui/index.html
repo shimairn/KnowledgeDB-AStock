@@ -15,9 +15,12 @@
         <h1 id="kbLabel" class="app-header__title">财经知识库</h1>
       </div>
 
-      <div id="statusWrap" class="status status--ready" role="status" aria-live="polite" aria-atomic="true">
-        <span id="statusDot" class="status-dot status-dot--ready"></span>
-        <span id="statusText">初始化中...</span>
+      <div class="status-cluster">
+        <div id="statusWrap" class="status status--ready" role="status" aria-live="polite" aria-atomic="true">
+          <span id="statusDot" class="status-dot status-dot--ready"></span>
+          <span id="statusText">初始化中...</span>
+        </div>
+        <button id="stopBtn" class="icon-button" type="button" aria-label="停止生成" hidden>×</button>
       </div>
     </header>
 

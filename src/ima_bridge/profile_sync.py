@@ -4,6 +4,9 @@ import shutil
 from pathlib import Path
 
 from ima_bridge.config import Settings
+from ima_bridge.utils import get_logger
+
+logger = get_logger("ima_bridge.profile_sync")
 
 _TRANSIENT_NAMES = {
     "SingletonCookie",
@@ -48,6 +51,10 @@ def clone_profile_dir(source_dir: Path, target_dir: Path) -> bool:
         # On Windows, an in-use profile directory can fail to delete due to locks.
         # Treat this as a no-op instead of crashing UI startup.
         if target.exists():
+            logger.warning(
+                "profile seed skipped: target dir still exists (likely locked). target=%s",
+                str(target),
+            )
             return False
     target.parent.mkdir(parents=True, exist_ok=True)
     try:

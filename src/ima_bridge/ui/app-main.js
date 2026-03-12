@@ -17,6 +17,7 @@ const dom = {
   statusWrap: document.getElementById("statusWrap"),
   statusDot: document.getElementById("statusDot"),
   statusText: document.getElementById("statusText"),
+  stopBtn: document.getElementById("stopBtn"),
   emptyState: document.getElementById("emptyState"),
   conversationViewport: document.getElementById("conversationViewport"),
   chat: document.getElementById("chat"),
@@ -33,6 +34,7 @@ const state = {
   steadyPollIntervalMs: DEFAULT_STEADY_POLL_INTERVAL_MS,
   isPinnedToBottom: true,
   lastViewportScrollTop: 0,
+  abortController: null,
 };
 
 export async function bootstrap() {
@@ -83,6 +85,18 @@ function bindEvents() {
         return;
       }
       clearConversation();
+    });
+  }
+
+  if (dom.stopBtn) {
+    dom.stopBtn.addEventListener("click", () => {
+      if (state.abortController) {
+        try {
+          state.abortController.abort();
+        } catch (_) {
+          // ignore
+        }
+      }
     });
   }
 
@@ -151,6 +165,11 @@ function syncComposerState() {
   if (dom.newConversationBtn) {
     dom.newConversationBtn.hidden = !hasHistory;
     dom.newConversationBtn.disabled = state.isBusy || !hasHistory;
+  }
+
+  if (dom.stopBtn) {
+    dom.stopBtn.hidden = !state.isBusy;
+    dom.stopBtn.disabled = !state.isBusy;
   }
 }
 
@@ -727,6 +746,8 @@ async function askQuestion(question) {
   setBusy(true);
   setStatus("busy", "整理中...");
 
+  state.abortController = new AbortController();
+
   let streamAnswerHtml = "";
   let donePayload = null;
 
@@ -735,6 +756,7 @@ async function askQuestion(question) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ question }),
+      signal: state.abortController.signal,
     });
 
     if (!resp.ok) {
@@ -794,9 +816,15 @@ async function askQuestion(question) {
     }
     await refreshHealth();
   } catch (error) {
-    setStatus("error", "请求失败");
-    view.setError(error instanceof Error ? error.message : String(error || "请求失败"));
+    if (error && typeof error === "object" && "name" in error && error.name === "AbortError") {
+      setStatus("error", "已停止");
+      view.setError("已停止生成");
+    } else {
+      setStatus("error", "请求失败");
+      view.setError(error instanceof Error ? error.message : String(error || "请求失败"));
+    }
   } finally {
+    state.abortController = null;
     setBusy(false);
     syncUiState();
     scrollChatToBottom();

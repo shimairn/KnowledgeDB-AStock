@@ -59,6 +59,7 @@ class WorkerPoolManager:
         self._lock = Lock()
         self._cached_model_catalog = self._fallback_model_catalog()
         self._refresh_in_progress = False
+        self._last_profile_seed_report: dict | None = None
         self._workers = [self._build_worker_slot(index=index) for index in range(1, self.worker_count + 1)]
 
     @property
@@ -250,13 +251,27 @@ class WorkerPoolManager:
     def seed_profiles_from(self, source_settings: Settings | None = None) -> int:
         source = source_settings or self.template_settings
         seeded = 0
+        attempted = 0
+        seeded_workers: list[str] = []
         for worker in self._workers:
-            if sync_profile_state(source, worker.settings):
+            attempted += 1
+            changed = sync_profile_state(source, worker.settings)
+            if changed:
                 worker.status = "warming"
                 worker.last_error_code = None
                 worker.last_error_message = None
                 seeded += 1
+                seeded_workers.append(worker.worker_id)
+
+        self._last_profile_seed_report = {
+            "attempted": attempted,
+            "seeded": seeded,
+            "seeded_workers": seeded_workers,
+        }
         return seeded
+
+    def profile_seed_report(self) -> dict | None:
+        return self._last_profile_seed_report
 
     def get_model_catalog(self) -> DriverModelCatalog:
         return self._cached_model_catalog

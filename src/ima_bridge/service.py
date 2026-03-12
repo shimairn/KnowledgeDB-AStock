@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import inspect
+import threading
 from typing import Callable
 
 from ima_bridge.config import Settings, get_settings
@@ -129,6 +131,7 @@ class IMAAskService:
         question: str,
         model: str | None = None,
         on_update: Callable[..., None] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> AskResponse:
         kb = KnowledgeBaseIdentity(name=self.settings.kb_name, owner=self.settings.kb_owner, title=self.settings.kb_title)
         base = AskResponse(
@@ -141,7 +144,16 @@ class IMAAskService:
             captured_at=now_iso(),
         )
         try:
-            result = self.ask_driver.ask(question=question, model=model, on_update=on_update)
+            ask_fn = self.ask_driver.ask
+            try:
+                params = inspect.signature(ask_fn).parameters
+            except (TypeError, ValueError):
+                params = {}
+
+            if cancel_event is not None and "cancel_event" in params:
+                result = ask_fn(question=question, model=model, on_update=on_update, cancel_event=cancel_event)
+            else:
+                result = ask_fn(question=question, model=model, on_update=on_update)
             return base.model_copy(
                 update={
                     "ok": True,

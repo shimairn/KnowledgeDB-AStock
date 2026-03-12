@@ -132,6 +132,11 @@ def start_output_gc_thread(
                     stats.removed_dirs,
                     stats.errors,
                 )
+            elif stats.errors:
+                logger.warning(
+                    "output gc: removed_files=0 removed_dirs=0 errors=%s (likely locked files)",
+                    stats.errors,
+                )
             stop.wait(max(5.0, float(interval_seconds)))
 
     thread = threading.Thread(target=runner, name="ima-output-gc", daemon=True)
