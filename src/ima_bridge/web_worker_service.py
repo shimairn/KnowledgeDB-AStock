@@ -19,12 +19,212 @@ from ima_bridge.driver_protocol import (
 )
 from ima_bridge.errors import AskCancelledError, CaptureFailedError
 from ima_bridge.service import IMAAskService
-from ima_bridge.ui_media import download_images_to_local, inject_placeholder_img_sources
+from ima_bridge.ui_media import (
+    download_images_to_local,
+    extract_img_srcs,
+    inject_placeholder_img_sources,
+    rewrite_img_sources,
+)
 from ima_bridge.web_driver import WebAskDriver
 from ima_bridge.utils import get_logger, timestamp_slug
 
 logger = get_logger("ima_bridge.web_worker_service")
 _VECTOR_PLACEHOLDER_RE = re.compile(r"data-ima-bridge-media=(?:\"|')(vector-\d+)(?:\"|')", re.IGNORECASE)
+
+
+def _is_local_ui_src(src: str) -> bool:
+    value = str(src or "").strip()
+    return value.startswith("/api/") or value.startswith("/assets/")
+
+
+def _snapshot_vector_media(
+    *,
+    web_driver: WebAskDriver,
+    page: Page,
+    output_dir,
+    instance: str,
+    placeholders: list[str],
+    max_vectors: int,
+    stamp: str,
+    existing: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Best-effort snapshot for svg/canvas charts that were replaced with <img data-ima-bridge-media="vector-N">."""
+
+    existing = dict(existing or {})
+    placeholder_urls: dict[str, str] = {}
+    if not placeholders or max_vectors <= 0:
+        return placeholder_urls
+
+    try:
+        target = web_driver.answer_extractor.find_latest_ai_nodes(page)
+    except Exception:
+        target = None
+    if target is None:
+        return placeholder_urls
+
+    _container, bubble = target
+    root = bubble.locator("div[class*='_markdown_']").first
+    try:
+        if root.count() == 0:
+            root = bubble
+    except Exception:
+        root = bubble
+
+    media = root.locator("svg,canvas")
+    try:
+        media_count = media.count()
+    except Exception:
+        media_count = 0
+    if media_count <= 0:
+        return placeholder_urls
+
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return placeholder_urls
+
+    limit = min(media_count, len(placeholders), max_vectors)
+    for i in range(limit):
+        placeholder_id = placeholders[i]
+        if placeholder_id in existing:
+            continue
+        filename = f"{placeholder_id}-{stamp}-{i}.png"
+        path = output_dir / filename
+        try:
+            media.nth(i).screenshot(path=str(path))
+        except Exception:
+            continue
+        existing_url = f"/api/media/{instance}/{filename}"
+        existing[placeholder_id] = existing_url
+        placeholder_urls[placeholder_id] = existing_url
+    return placeholder_urls
+
+
+class StreamAnswerHtmlLocalizer:
+    def __init__(
+        self,
+        *,
+        settings: Settings,
+        web_driver: WebAskDriver,
+        page: Page,
+        context: BrowserContext,
+        output_dir,
+        url_prefix: str,
+        max_images: int,
+        interval_ms: int,
+        src_cache: dict[str, str],
+        placeholder_cache: dict[str, str],
+    ) -> None:
+        self.settings = settings
+        self.web_driver = web_driver
+        self.page = page
+        self.context = context
+        self.output_dir = output_dir
+        self.url_prefix = str(url_prefix or "")
+        self.max_images = max(0, int(max_images))
+        self.interval_seconds = max(0.0, float(interval_ms) / 1000.0)
+        self.src_cache = src_cache
+        self.placeholder_cache = placeholder_cache
+        self._last_heavy_at = 0.0
+        self._stamp = timestamp_slug()
+
+    def _needs_heavy_work(self, html: str) -> bool:
+        if self.max_images > 0:
+            for src in extract_img_srcs(html):
+                if not _is_local_ui_src(src):
+                    return True
+        placeholders = _VECTOR_PLACEHOLDER_RE.findall(html or "")
+        return any(pid not in self.placeholder_cache for pid in placeholders)
+
+    def _localize_impl(
+        self,
+        html: str,
+        *,
+        max_images: int,
+        max_bytes: int,
+        max_total_bytes: int,
+        max_data_uri_chars: int,
+        max_vectors: int,
+    ) -> str:
+        localized_html = rewrite_img_sources(html, self.src_cache, placeholder_map=self.placeholder_cache)
+        localized, items = download_images_to_local(
+            page=self.page,
+            context=self.context,
+            answer_html=localized_html,
+            output_dir=self.output_dir,
+            url_prefix=self.url_prefix,
+            max_images=max_images,
+            max_bytes=max_bytes,
+            max_total_bytes=max_total_bytes,
+            max_data_uri_chars=max_data_uri_chars,
+        )
+        for media in items:
+            local_url = f"{self.url_prefix.rstrip('/')}/{media.local_relpath}"
+            self.src_cache[media.original_src] = local_url
+        localized_html = localized
+
+        placeholders = _VECTOR_PLACEHOLDER_RE.findall(localized_html)
+        if placeholders and max_vectors > 0:
+            created = _snapshot_vector_media(
+                web_driver=self.web_driver,
+                page=self.page,
+                output_dir=self.output_dir,
+                instance=self.settings.instance,
+                placeholders=placeholders,
+                max_vectors=max_vectors,
+                stamp=self._stamp,
+                existing=self.placeholder_cache,
+            )
+            if created:
+                self.placeholder_cache.update(created)
+                localized_html = inject_placeholder_img_sources(localized_html, created)
+        return localized_html
+
+    def localize_stream(self, html: str) -> str:
+        source = str(html or "").strip()
+        if not source:
+            return ""
+        # Cheap path: apply cached rewrites immediately for each snapshot.
+        rewritten = rewrite_img_sources(source, self.src_cache, placeholder_map=self.placeholder_cache)
+
+        if self.interval_seconds <= 0:
+            return self._localize_impl(
+                rewritten,
+                max_images=self.max_images,
+                max_bytes=8 * 1024 * 1024,
+                max_total_bytes=10 * 1024 * 1024,
+                max_data_uri_chars=1 * 1024 * 1024,
+                max_vectors=max(0, int(getattr(self.settings, "web_vector_snapshot_max", 6))),
+            )
+
+        now = time.monotonic()
+        if now - float(self._last_heavy_at or 0.0) < self.interval_seconds:
+            return rewritten
+        if not self._needs_heavy_work(rewritten):
+            return rewritten
+
+        self._last_heavy_at = now
+        return self._localize_impl(
+            rewritten,
+            max_images=self.max_images,
+            max_bytes=8 * 1024 * 1024,
+            max_total_bytes=10 * 1024 * 1024,
+            max_data_uri_chars=1 * 1024 * 1024,
+            max_vectors=max(0, int(getattr(self.settings, "web_vector_snapshot_max", 6))),
+        )
+
+    def localize_final(self, html: str) -> str:
+        source = str(html or "").strip()
+        if not source:
+            return ""
+        return self._localize_impl(
+            source,
+            max_images=16,
+            max_bytes=25 * 1024 * 1024,
+            max_total_bytes=25 * 1024 * 1024,
+            max_data_uri_chars=4 * 1024 * 1024,
+            max_vectors=max(0, int(getattr(self.settings, "web_vector_snapshot_max", 6))),
+        )
 
 
 class PersistentWebAskDriver(AskDriver):
@@ -44,6 +244,7 @@ class PersistentWebAskDriver(AskDriver):
         self._context_headless: bool | None = None
         self._request_count = 0
         self._last_context_at = 0.0
+        self._ui_conversation_id: str | None = None
 
     def close(self) -> None:
         self._close_context()
@@ -121,9 +322,18 @@ class PersistentWebAskDriver(AskDriver):
         model: str | None = None,
         on_update: Callable[..., None] | None = None,
         cancel_event: threading.Event | None = None,
+        conversation_id: str | None = None,
+        reset_conversation: bool = False,
     ) -> DriverAskResult:
         self._ensure_context(headless=self.settings.web_headless)
-        return self._ask_in_context(question=question, model=model, on_update=on_update, cancel_event=cancel_event)
+        return self._ask_in_context(
+            question=question,
+            model=model,
+            on_update=on_update,
+            cancel_event=cancel_event,
+            conversation_id=conversation_id,
+            reset_conversation=reset_conversation,
+        )
 
     def _ensure_playwright(self) -> Playwright:
         if self._playwright is not None:
@@ -187,6 +397,7 @@ class PersistentWebAskDriver(AskDriver):
                 pass
         self._context = None
         self._context_headless = None
+        self._ui_conversation_id = None
 
     def _safe_prepare_chat_page(self) -> Page:
         if self._context is None:
@@ -259,21 +470,91 @@ class PersistentWebAskDriver(AskDriver):
         model: str | None,
         on_update: Callable[..., None] | None,
         cancel_event: threading.Event | None,
+        conversation_id: str | None,
+        reset_conversation: bool,
     ) -> DriverAskResult:
         page = self._safe_prepare_chat_page()
         context = page.context
-        self.web_driver.conversation.start_new_conversation(page)
+        normalized_conversation_id = str(conversation_id or "").strip() or None
+        should_reset = bool(reset_conversation)
+        if normalized_conversation_id is None:
+            # Backwards-compat: without an explicit conversation id, keep the old "single-turn" behavior.
+            should_reset = True
+        elif self._ui_conversation_id is None or self._ui_conversation_id != normalized_conversation_id:
+            should_reset = True
+
+        if should_reset:
+            self.web_driver.conversation.start_new_conversation(page)
+            self._ui_conversation_id = normalized_conversation_id
         selected_model = self.web_driver.conversation.ensure_selected_model(page, requested_model=model)
 
         before_text = self.web_driver.session.body_text(page)
         before_html = self.web_driver.session.body_html(page)
         self.web_driver.conversation.submit_question(page, question)
 
+        output_dir = self.settings.artifacts_dir / "ui-media" / self.settings.instance
+        url_prefix = f"/api/media/{self.settings.instance}"
+        src_cache: dict[str, str] = {}
+        placeholder_cache: dict[str, str] = {}
+
+        stream_localizer: StreamAnswerHtmlLocalizer | None = None
+        wrapped_on_update = on_update
+        if callable(on_update) and bool(getattr(self.settings, "ui_stream_localize_media", True)):
+            stream_localizer = StreamAnswerHtmlLocalizer(
+                settings=self.settings,
+                web_driver=self.web_driver,
+                page=page,
+                context=context,
+                output_dir=output_dir,
+                url_prefix=url_prefix,
+                max_images=int(getattr(self.settings, "ui_stream_localize_max_images", 4)),
+                interval_ms=int(getattr(self.settings, "ui_stream_localize_interval_ms", 800)),
+                src_cache=src_cache,
+                placeholder_cache=placeholder_cache,
+            )
+
+            def _on_update_wrapped(*args, **kwargs):  # type: ignore[no-redef]
+                if cancel_event is not None and cancel_event.is_set():
+                    return
+                if not callable(on_update):
+                    return
+
+                payload = None
+                if kwargs:
+                    payload = dict(kwargs)
+                elif len(args) == 1 and isinstance(args[0], dict):
+                    payload = dict(args[0])
+
+                if payload is None:
+                    on_update(*args, **kwargs)
+                    return
+
+                phase = str(payload.get("phase") or ("answer_html" if payload.get("html") else ""))
+                if phase != "answer_html":
+                    on_update(payload)
+                    return
+
+                html_value = str(payload.get("html") or payload.get("answer_html") or "")
+                if not html_value.strip():
+                    on_update(payload)
+                    return
+
+                try:
+                    localized_html = stream_localizer.localize_stream(html_value) if stream_localizer else html_value
+                except Exception:
+                    localized_html = html_value
+
+                if localized_html != html_value:
+                    payload["html"] = localized_html
+                on_update(payload)
+
+            wrapped_on_update = _on_update_wrapped
+
         after_text, after_html = self.web_driver.conversation.wait_answer(
             page,
             before_text,
             question=question,
-            on_update=on_update,
+            on_update=wrapped_on_update,
             cancel_event=cancel_event,
         )
 
@@ -297,64 +578,19 @@ class PersistentWebAskDriver(AskDriver):
         localized_html = answer_html
         if localized_html:
             try:
-                output_dir = self.settings.artifacts_dir / "ui-media" / self.settings.instance
-                localized_html, localized = download_images_to_local(
+                final_localizer = stream_localizer or StreamAnswerHtmlLocalizer(
+                    settings=self.settings,
+                    web_driver=self.web_driver,
                     page=page,
                     context=context,
-                    answer_html=localized_html,
                     output_dir=output_dir,
-                    url_prefix=f"/api/media/{self.settings.instance}",
-                    max_images=16,
-                    max_bytes=25 * 1024 * 1024,
-                    max_total_bytes=25 * 1024 * 1024,
-                    max_data_uri_chars=4 * 1024 * 1024,
+                    url_prefix=url_prefix,
+                    max_images=0,
+                    interval_ms=0,
+                    src_cache=src_cache,
+                    placeholder_cache=placeholder_cache,
                 )
-                if localized:
-                    logger.info("localized images: count=%s instance=%s", len(localized), self.settings.instance)
-
-                placeholders = _VECTOR_PLACEHOLDER_RE.findall(localized_html)
-                if placeholders:
-                    placeholder_urls: dict[str, str] = {}
-                    try:
-                        target = self.web_driver.answer_extractor.find_latest_ai_nodes(page)
-                    except Exception:
-                        target = None
-                    if target is not None:
-                        _container, bubble = target
-                        root = bubble.locator("div[class*='_markdown_']").first
-                        try:
-                            if root.count() == 0:
-                                root = bubble
-                        except Exception:
-                            root = bubble
-
-                        media = root.locator("svg,canvas")
-                        try:
-                            media_count = media.count()
-                        except Exception:
-                            media_count = 0
-
-                        if media_count:
-                            stamp = timestamp_slug()
-                            output_dir.mkdir(parents=True, exist_ok=True)
-                            max_vectors = max(0, int(getattr(self.settings, "web_vector_snapshot_max", 6)))
-                            for i in range(min(media_count, len(placeholders), max_vectors)):
-                                placeholder_id = placeholders[i]
-                                filename = f"{placeholder_id}-{stamp}-{i}.png"
-                                path = output_dir / filename
-                                try:
-                                    media.nth(i).screenshot(path=str(path))
-                                except Exception:
-                                    continue
-                                placeholder_urls[placeholder_id] = f"/api/media/{self.settings.instance}/{filename}"
-
-                    if placeholder_urls:
-                        localized_html = inject_placeholder_img_sources(localized_html, placeholder_urls)
-                        logger.info(
-                            "snapshotted vector media: count=%s instance=%s",
-                            len(placeholder_urls),
-                            self.settings.instance,
-                        )
+                localized_html = final_localizer.localize_final(localized_html)
             except Exception:
                 localized_html = answer_html
         return DriverAskResult(
@@ -408,8 +644,22 @@ class WebWorkerService:
     def get_model_catalog(self) -> DriverModelCatalog:
         return self._submit(self._service.get_model_catalog).result()
 
-    def ask(self, question: str, model: str | None = None):
-        return self._submit(self._service.ask, question, model).result()
+    def ask(
+        self,
+        question: str,
+        model: str | None = None,
+        conversation_id: str | None = None,
+        reset_conversation: bool = False,
+    ):
+        return self._submit(
+            self._service.ask_with_updates,
+            question,
+            model,
+            None,
+            None,
+            conversation_id,
+            reset_conversation,
+        ).result()
 
     def ask_with_updates(
         self,
@@ -417,8 +667,18 @@ class WebWorkerService:
         model: str | None = None,
         on_update: Callable[..., None] | None = None,
         cancel_event: threading.Event | None = None,
+        conversation_id: str | None = None,
+        reset_conversation: bool = False,
     ):
-        return self._submit(self._service.ask_with_updates, question, model, on_update, cancel_event).result()
+        return self._submit(
+            self._service.ask_with_updates,
+            question,
+            model,
+            on_update,
+            cancel_event,
+            conversation_id,
+            reset_conversation,
+        ).result()
 
     def ask_with_updates_future(
         self,
@@ -426,5 +686,15 @@ class WebWorkerService:
         model: str | None = None,
         on_update: Callable[..., None] | None = None,
         cancel_event: threading.Event | None = None,
+        conversation_id: str | None = None,
+        reset_conversation: bool = False,
     ) -> Future:
-        return self._submit(self._service.ask_with_updates, question, model, on_update, cancel_event)
+        return self._submit(
+            self._service.ask_with_updates,
+            question,
+            model,
+            on_update,
+            cancel_event,
+            conversation_id,
+            reset_conversation,
+        )

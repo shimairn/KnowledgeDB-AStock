@@ -289,8 +289,9 @@ class WebConversationRunner:
         stable_rounds = 0
         previous_signature = self.text_signature(before_text)
         content_stable_rounds = 0
+        baseline_content_signature: tuple[str, str, str] | None = None
         previous_content_signature = self.content_signature(ExtractedAIContent())
-        changed = False
+        saw_new_content = False
         latest_text = before_text
         latest_html = self.session.body_html(page)
         latest_answer_html = ""
@@ -306,6 +307,9 @@ class WebConversationRunner:
             latest_content = self.extractor.extract_latest_ai_content(page) or ExtractedAIContent()
             current_signature = self.text_signature(latest_text)
             current_content_signature = self.content_signature(latest_content)
+            if baseline_content_signature is None:
+                baseline_content_signature = current_content_signature
+                previous_content_signature = current_content_signature
 
             if current_signature == previous_signature:
                 stable_rounds += 1
@@ -319,31 +323,33 @@ class WebConversationRunner:
                 content_stable_rounds = 0
             previous_content_signature = current_content_signature
 
-            if latest_text != before_text or self.has_answer_content(latest_content):
-                changed = True
+            if baseline_content_signature is not None and current_content_signature != baseline_content_signature:
+                saw_new_content = True
 
             if on_update is not None:
-                latest_answer_html = self._emit_html_snapshot(
-                    current_html=latest_content.answer_html,
-                    previous_html=latest_answer_html,
-                    on_update=on_update,
-                )
-                latest_thinking_text = self._emit_update(
-                    phase="thinking",
-                    current_text=latest_content.thinking_text,
-                    previous_text=latest_thinking_text,
-                    on_update=on_update,
-                )
+                # Avoid re-emitting the previous answer when we ask a follow-up question in the same conversation.
+                if saw_new_content:
+                    latest_answer_html = self._emit_html_snapshot(
+                        current_html=latest_content.answer_html,
+                        previous_html=latest_answer_html,
+                        on_update=on_update,
+                    )
+                    latest_thinking_text = self._emit_update(
+                        phase="thinking",
+                        current_text=latest_content.thinking_text,
+                        previous_text=latest_thinking_text,
+                        on_update=on_update,
+                    )
 
-            if changed and latest_text != before_text and stable_rounds >= 2 and not self.has_loading_state(latest_text):
+            if latest_text != before_text and stable_rounds >= 2 and not self.has_loading_state(latest_text):
                 return latest_text, latest_html
 
-            if self.has_stable_answer_content(latest_content, stable_rounds=content_stable_rounds):
+            if saw_new_content and self.has_stable_answer_content(latest_content, stable_rounds=content_stable_rounds):
                 return latest_text, latest_html
 
             page.wait_for_timeout(int(self.settings.poll_interval_seconds * 1000))
 
-        if self.has_stable_answer_content(latest_content, stable_rounds=content_stable_rounds):
+        if saw_new_content and self.has_stable_answer_content(latest_content, stable_rounds=content_stable_rounds):
             return latest_text, latest_html
 
         raise AskTimeoutError("Timed out waiting for answer completion")

@@ -25,7 +25,7 @@ from ima_bridge.ui_rate_limit import UIRateLimiter
 from ima_bridge.worker_pool import WorkerPoolManager, WorkerSlot
 
 RETRY_AFTER_SECONDS = 5
-ASSET_CACHE_CONTROL = "public, max-age=3600"
+ASSET_CACHE_CONTROL = "public, max-age=60"
 STARTUP_POLL_INTERVAL_MS = 1500
 STEADY_POLL_INTERVAL_MS = 15000
 UI_ASSET_NAMES = (
@@ -44,6 +44,8 @@ ASSET_MEDIA_TYPES = {
 class UIAskRequest:
     question: str
     model: str | None
+    conversation_id: str | None
+    reset_conversation: bool = False
 
 
 @dataclass(slots=True)
@@ -123,6 +125,8 @@ def _parse_ui_request(payload: dict[str, Any] | None) -> UIAskRequest:
     return UIAskRequest(
         question=_extract_payload_text(payload, "question"),
         model=_extract_payload_text(payload, "model") or None,
+        conversation_id=_extract_payload_text(payload, "conversation_id") or None,
+        reset_conversation=bool(payload.get("reset_conversation")) if payload else False,
     )
 
 
@@ -189,6 +193,8 @@ def _acquire_ui_worker(
     settings: Settings,
     pool: WorkerPoolManager,
     limiter: UIRateLimiter,
+    conversation_routes: dict[str, str] | None = None,
+    conversation_lock: threading.Lock | None = None,
 ) -> tuple[UIAskRequest | None, UIWorkerLease | None, JSONResponse | None]:
     request_data = _parse_ui_request(payload)
     if not request_data.question:
@@ -199,13 +205,52 @@ def _acquire_ui_worker(
     if not decision.allowed:
         return None, None, _rate_limited_response(decision.retry_after_seconds or 1)
 
-    worker = pool.try_acquire()
+    preferred_worker_id: str | None = None
+    had_route = False
+    if request_data.conversation_id and conversation_routes is not None and conversation_lock is not None:
+        with conversation_lock:
+            preferred_worker_id = conversation_routes.get(request_data.conversation_id)
+            had_route = preferred_worker_id is not None
+
+        if preferred_worker_id:
+            bound = next((w for w in pool.workers if w.worker_id == preferred_worker_id), None)
+            if bound is None or bound.status in {"error", "login_required", "warming"}:
+                with conversation_lock:
+                    conversation_routes.pop(request_data.conversation_id, None)
+                preferred_worker_id = None
+                had_route = False
+
+    try_acquire = getattr(pool, "try_acquire", None)
+    if not callable(try_acquire):
+        limiter.release(client_ip)
+        return None, None, _json_error("CAPTURE_FAILED", "pool.try_acquire is not callable", status_code=500)
+
+    strict_preference = bool(preferred_worker_id and had_route)
+    try:
+        acquire_params = inspect.signature(try_acquire).parameters
+    except (TypeError, ValueError):
+        acquire_params = {}
+
+    if "strict" in acquire_params:
+        worker = try_acquire(preferred_worker_id, strict=strict_preference)
+    else:
+        # Best-effort compatibility with older pool managers (e.g. tests).
+        if preferred_worker_id and acquire_params:
+            worker = try_acquire(preferred_worker_id)
+        else:
+            worker = try_acquire()
     if worker is None:
         limiter.release(client_ip)
         pool_health = pool.health_payload()
         if pool_health.get("status") == "warming" or pool_health.get("error_code") == "WARMING_UP":
             return None, None, _warming_response()
         return None, None, _busy_response()
+
+    if request_data.conversation_id and conversation_routes is not None and conversation_lock is not None:
+        with conversation_lock:
+            conversation_routes.setdefault(request_data.conversation_id, worker.worker_id)
+            if len(conversation_routes) > 1024:
+                conversation_routes.clear()
 
     return (
         request_data,
@@ -252,19 +297,18 @@ async def _build_stream(request: Request, request_data: UIAskRequest, lease: UIW
     ask_future = getattr(lease.worker.service, "ask_with_updates_future", None)
     if callable(ask_future):
         future_params = inspect.signature(ask_future).parameters
+        future_kwargs: dict[str, Any] = {
+            "question": request_data.question,
+            "model": request_data.model,
+            "on_update": on_update,
+        }
+        if "conversation_id" in future_params:
+            future_kwargs["conversation_id"] = request_data.conversation_id
+        if "reset_conversation" in future_params:
+            future_kwargs["reset_conversation"] = request_data.reset_conversation
         if "cancel_event" in future_params:
-            future = ask_future(
-                question=request_data.question,
-                model=request_data.model,
-                on_update=on_update,
-                cancel_event=cancel_event,
-            )
-        else:
-            future = ask_future(
-                question=request_data.question,
-                model=request_data.model,
-                on_update=on_update,
-            )
+            future_kwargs["cancel_event"] = cancel_event
+        future = ask_future(**future_kwargs)
 
         def on_done(done) -> None:
             try:
@@ -295,6 +339,10 @@ async def _build_stream(request: Request, request_data: UIAskRequest, lease: UIW
                     "model": request_data.model,
                     "on_update": on_update,
                 }
+                if "conversation_id" in params:
+                    kwargs["conversation_id"] = request_data.conversation_id
+                if "reset_conversation" in params:
+                    kwargs["reset_conversation"] = request_data.reset_conversation
                 if "cancel_event" in params:
                     kwargs["cancel_event"] = cancel_event
 
@@ -346,6 +394,8 @@ def create_chat_ui_app(
         per_minute=settings.ui_rate_limit_per_minute,
         max_concurrent_per_ip=settings.ui_max_concurrent_per_ip,
     )
+    conversation_routes: dict[str, str] = {}
+    conversation_lock = threading.Lock()
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -466,12 +516,23 @@ def create_chat_ui_app(
             settings=settings,
             pool=pool,
             limiter=limiter,
+            conversation_routes=conversation_routes,
+            conversation_lock=conversation_lock,
         )
         if error_response is not None:
             return error_response
 
         try:
-            response = lease.worker.service.ask(question=request_data.question, model=request_data.model)
+            ask = getattr(lease.worker.service, "ask", None)
+            if not callable(ask):
+                raise RuntimeError("ask not supported")
+            params = inspect.signature(ask).parameters
+            kwargs: dict[str, Any] = {"question": request_data.question, "model": request_data.model}
+            if "conversation_id" in params:
+                kwargs["conversation_id"] = request_data.conversation_id
+            if "reset_conversation" in params:
+                kwargs["reset_conversation"] = request_data.reset_conversation
+            response = ask(**kwargs)
             lease.release(response=response)
             return JSONResponse(_ui_response_payload(response))
         except Exception as exc:
@@ -486,6 +547,8 @@ def create_chat_ui_app(
             settings=settings,
             pool=pool,
             limiter=limiter,
+            conversation_routes=conversation_routes,
+            conversation_lock=conversation_lock,
         )
         if error_response is not None:
             return error_response

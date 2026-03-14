@@ -44,6 +44,11 @@ class Settings:
     ui_rate_limit_per_minute: int = field(default_factory=lambda: int(os.getenv("IMA_UI_RATE_LIMIT_PER_MINUTE", "12")))
     ui_max_concurrent_per_ip: int = field(default_factory=lambda: int(os.getenv("IMA_UI_MAX_CONCURRENT_PER_IP", "2")))
     ui_trust_proxy: bool = field(default_factory=lambda: os.getenv("IMA_UI_TRUST_PROXY", "0") == "1")
+    ui_stream_localize_media: bool = field(default_factory=lambda: os.getenv("IMA_UI_STREAM_LOCALIZE_MEDIA", "1") == "1")
+    ui_stream_localize_interval_ms: int = field(
+        default_factory=lambda: int(os.getenv("IMA_UI_STREAM_LOCALIZE_INTERVAL_MS", "800"))
+    )
+    ui_stream_localize_max_images: int = field(default_factory=lambda: int(os.getenv("IMA_UI_STREAM_LOCALIZE_MAX_IMAGES", "4")))
     output_gc_enabled: bool = field(default_factory=lambda: os.getenv("IMA_OUTPUT_GC_ENABLED", "1") == "1")
     output_gc_interval_seconds: float = field(default_factory=lambda: float(os.getenv("IMA_OUTPUT_GC_INTERVAL_SECONDS", "1800")))
     output_gc_retention_hours: float = field(default_factory=lambda: float(os.getenv("IMA_OUTPUT_GC_RETENTION_HOURS", "24")))
@@ -141,4 +146,3 @@ def resolve_web_profile_dir(instance: str) -> Path:
 def is_loopback_host(host: str) -> bool:
     normalized = (host or "").strip().lower()
     return normalized in {"127.0.0.1", "localhost", "::1"}
-

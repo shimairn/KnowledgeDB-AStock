@@ -129,8 +129,15 @@ class WorkerPoolManager:
                 self._cached_model_catalog = cached_catalog
         return worker.status
 
-    def try_acquire(self) -> WorkerSlot | None:
+    def try_acquire(self, preferred_worker_id: str | None = None, *, strict: bool = False) -> WorkerSlot | None:
         with self._lock:
+            if preferred_worker_id:
+                for worker in self._workers:
+                    if worker.worker_id == preferred_worker_id and worker.status == "ready":
+                        worker.status = "busy"
+                        return worker
+                if strict:
+                    return None
             for worker in self._workers:
                 if worker.status == "ready":
                     worker.status = "busy"

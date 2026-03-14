@@ -132,6 +132,8 @@ class IMAAskService:
         model: str | None = None,
         on_update: Callable[..., None] | None = None,
         cancel_event: threading.Event | None = None,
+        conversation_id: str | None = None,
+        reset_conversation: bool = False,
     ) -> AskResponse:
         kb = KnowledgeBaseIdentity(name=self.settings.kb_name, owner=self.settings.kb_owner, title=self.settings.kb_title)
         base = AskResponse(
@@ -150,10 +152,14 @@ class IMAAskService:
             except (TypeError, ValueError):
                 params = {}
 
+            kwargs: dict[str, object] = {"question": question, "model": model, "on_update": on_update}
             if cancel_event is not None and "cancel_event" in params:
-                result = ask_fn(question=question, model=model, on_update=on_update, cancel_event=cancel_event)
-            else:
-                result = ask_fn(question=question, model=model, on_update=on_update)
+                kwargs["cancel_event"] = cancel_event
+            if "conversation_id" in params:
+                kwargs["conversation_id"] = conversation_id
+            if "reset_conversation" in params:
+                kwargs["reset_conversation"] = bool(reset_conversation)
+            result = ask_fn(**kwargs)
             return base.model_copy(
                 update={
                     "ok": True,

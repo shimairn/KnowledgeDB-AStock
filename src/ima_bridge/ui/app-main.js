@@ -35,12 +35,17 @@ const state = {
   isPinnedToBottom: true,
   lastViewportScrollTop: 0,
   abortController: null,
+  conversationId: "",
 };
 
 export async function bootstrap() {
   setKbLabel(DEFAULT_KB_LABEL);
   setStatus("ready", "初始化中...");
   clearConversation({ focus: false });
+  state.conversationId =
+    typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : String(Math.random()).slice(2) + "-" + Date.now();
   syncQuestionHeight();
   syncUiState();
 
@@ -85,6 +90,10 @@ function bindEvents() {
         return;
       }
       clearConversation();
+      state.conversationId =
+        typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+          ? crypto.randomUUID()
+          : String(Math.random()).slice(2) + "-" + Date.now();
     });
   }
 
@@ -343,6 +352,7 @@ function plainTextToHtml(text) {
   return `<p>${escapeHtml(normalized).replace(/\n/g, "<br>")}</p>`;
 }
 
+
 const RICH_DROP_TAGS = new Set([
   "script",
   "noscript",
@@ -363,47 +373,32 @@ const RICH_DROP_TAGS = new Set([
   "canvas",
 ]);
 
-function createRichTypewriter(container, { tickMs, onStart, onProgress, onDone }) {
-  let typedLen = 0;
+  function createRichTypewriter(container, { tickMs, onStart, onProgress, onDone }) {
+    let typedLen = 0;
+
+    let done = false;
+    let running = false;
+  let raf = 0;
+  let lastTickAt = 0;
+  let startedDisplay = false;
+
+  // Target is the *latest* streamed HTML.
+  let pendingHtml = "";
+  let lastBuiltHtml = "";
   let segments = [];
   let segmentIndex = 0;
   let segmentOffset = 0;
   let totalLen = 0;
 
-  let done = false;
-  let running = false;
-  let raf = 0;
-  let lastTickAt = 0;
+    let buildTimer = 0;
+    let lastBuildAt = 0;
+    const BUILD_MIN_INTERVAL_MS = 120;
+    let swapOnNextBuild = false;
 
-  let pendingHtml = "";
-  let lastBuiltHtml = "";
-  let lastBuiltIncludeImages = false;
-  let buildTimer = 0;
-  let lastBuildAt = 0;
-  let startedDisplay = false;
-
-  // During streaming, some models temporarily emit empty/placeholder list items
-  // (e.g. "2." with blank bullets). Hide those nodes until they have real content.
-  const shouldHidePlaceholder = (el) => {
-    if (!el || el.nodeType !== Node.ELEMENT_NODE) {
-      return false;
-    }
-    const tag = String(el.tagName || "").toLowerCase();
-    if (tag !== "li") {
-      return false;
-    }
-    const text = String(el.textContent || "").replace(/\s+/g, " ").trim();
-    if (!text) {
-      return true;
-    }
-    // Examples to hide: "1.", "2.", "-", "•", "*".
-    return /^(?:\d+[.)]?|[-*•])$/.test(text);
-  };
-
-  const stop = () => {
-    running = false;
-    if (raf) {
-      window.cancelAnimationFrame(raf);
+    const stop = () => {
+      running = false;
+      if (raf) {
+        window.cancelAnimationFrame(raf);
       raf = 0;
     }
     if (buildTimer) {
@@ -412,13 +407,236 @@ function createRichTypewriter(container, { tickMs, onStart, onProgress, onDone }
     }
   };
 
+  const normalizeTypingText = (value) => {
+    return String(value || "")
+      .replace(/[\s\u00A0\u200B-\u200D\uFEFF]+/g, " ")
+      .trim();
+  };
+
+  const isMarkerOnlyText = (text) => {
+    const normalized = normalizeTypingText(text);
+    return /^(?:\d+[.)]?|[-*•])$/.test(normalized);
+  };
+
+  const shouldHidePlaceholder = (el) => {
+    if (!el || el.nodeType !== Node.ELEMENT_NODE) {
+      return false;
+    }
+
+    const tag = String(el.tagName || "").toLowerCase();
+
+    if (tag === "li") {
+      const text = normalizeTypingText(el.textContent || "");
+      if (!text) {
+        return true;
+      }
+      return isMarkerOnlyText(text);
+    }
+
+    if (tag === "p") {
+      if (el.closest("blockquote,pre,table,li")) {
+        return false;
+      }
+      const text = normalizeTypingText(el.textContent || "");
+      if (!text) {
+        return false;
+      }
+      if (!isMarkerOnlyText(text)) {
+        return false;
+      }
+      const hasNonBrElementChild = Array.from(el.childNodes || []).some((node) => {
+        if (!node || node.nodeType !== Node.ELEMENT_NODE) {
+          return false;
+        }
+        return String(node.tagName || "").toLowerCase() !== "br";
+      });
+      return !hasNonBrElementChild;
+    }
+
+    return false;
+  };
+
+  const revealIfReady = (el) => {
+    if (!el || el.nodeType !== Node.ELEMENT_NODE) {
+      return;
+    }
+    if (!el.classList.contains("typing-hidden")) {
+      return;
+    }
+    if (!shouldHidePlaceholder(el)) {
+      el.classList.remove("typing-hidden");
+    }
+  };
+
+    const charsPerTick = () => {
+      // Use totalLen as approximation for speed curve.
+      const remaining = Math.max(0, totalLen - typedLen);
+      if (done) {
+        if (remaining <= 120) return 6;
+        if (remaining <= 360) return 10;
+        return 14;
+      }
+      if (remaining <= 40) return 1;
+      if (remaining <= 120) return 2;
+      if (totalLen >= 6000) return 10;
+      if (totalLen >= 3500) return 8;
+    if (totalLen >= 1800) return 6;
+    if (totalLen >= 800) return 4;
+    if (totalLen >= 320) return 3;
+    return 2;
+  };
+
+    const buildSegments = (root) => {
+      const out = [];
+      const walker = root.ownerDocument.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      let node;
+      while ((node = walker.nextNode())) {
+        const value = String(node.nodeValue || "");
+        if (!value) {
+          continue;
+        }
+        const parent = node.parentElement;
+        if (!parent) {
+          continue;
+        }
+
+        // Typewriter only applies to prose paragraphs / list items.
+        // Tables, images, and code blocks should render immediately.
+        const scope = parent.closest("p,li");
+        if (!scope) {
+          continue;
+        }
+        if (parent.closest("table,pre,code,figure,figcaption")) {
+          continue;
+        }
+        out.push({ node, text: value });
+      }
+      return out;
+    };
+
+    const preserveExistingImages = () => {
+      const buckets = new Map();
+      container.querySelectorAll("img[src]").forEach((img) => {
+        const src = img.getAttribute("src");
+        if (!src) return;
+        const list = buckets.get(src) || [];
+        list.push(img);
+        buckets.set(src, list);
+      });
+      return buckets;
+    };
+
+    const restorePreservedImages = (buckets) => {
+      if (!buckets || buckets.size === 0) {
+        return;
+      }
+      container.querySelectorAll("img[src]").forEach((img) => {
+        const src = img.getAttribute("src");
+        if (!src) return;
+        const list = buckets.get(src);
+        if (!list || list.length === 0) return;
+        const preserved = list.shift();
+        if (!preserved || preserved === img) return;
+
+        const wasLoaded = preserved.classList.contains("rich-img--loaded");
+        const wasBroken = preserved.classList.contains("rich-img--broken");
+        try {
+          Array.from(img.attributes).forEach((attr) => {
+            preserved.setAttribute(attr.name, attr.value);
+          });
+          if (wasLoaded) preserved.classList.add("rich-img--loaded");
+          if (wasBroken) preserved.classList.add("rich-img--broken");
+        } catch (_) {
+          // ignore
+        }
+        img.replaceWith(preserved);
+      });
+    };
+
+    const applyVisibilityRules = (root) => {
+      root.querySelectorAll("li,p").forEach((el) => {
+        if (shouldHidePlaceholder(el)) {
+          el.classList.add("typing-hidden");
+      }
+    });
+  };
+
+    const buildFromPending = () => {
+      const next = String(pendingHtml || "").trim();
+      if (!next || next === lastBuiltHtml) {
+        return;
+      }
+
+      const preservedImages = preserveExistingImages();
+
+      // Parse incoming HTML fragment.
+      const parser = new DOMParser();
+      const documentHtml = /<html[\s>]/i.test(next)
+        ? next
+      : `<!doctype html><html><head></head><body>${next}</body></html>`;
+    const doc = parser.parseFromString(documentHtml, "text/html");
+    const body = doc.body;
+    if (!body) {
+      return;
+    }
+
+    // Drop unsafe/noisy tags.
+    body.querySelectorAll(Array.from(RICH_DROP_TAGS).join(",")).forEach((node) => node.remove());
+
+      applyVisibilityRules(body);
+
+      // Render full rich HTML immediately.
+      container.innerHTML = body.innerHTML;
+      restorePreservedImages(preservedImages);
+      if (swapOnNextBuild) {
+        swapOnNextBuild = false;
+        container.classList.add("rich-content--swap");
+      }
+
+      // Recompute segments on the live DOM inside container.
+      segments = buildSegments(container);
+      segmentIndex = 0;
+      segmentOffset = 0;
+      totalLen = segments.reduce((sum, seg) => sum + seg.text.length, 0);
+
+      // Keep typedLen (progress) but clamp it.
+      typedLen = Math.max(0, Math.min(typedLen, totalLen));
+
+      // Immediately apply typing mask for current progress.
+      let remaining = typedLen;
+      let nextSegmentIndex = segments.length;
+      let nextSegmentOffset = 0;
+      for (let i = 0; i < segments.length; i += 1) {
+        const seg = segments[i];
+        if (remaining >= seg.text.length) {
+          seg.node.nodeValue = seg.text;
+          remaining -= seg.text.length;
+        } else {
+          seg.node.nodeValue = seg.text.slice(0, remaining);
+          nextSegmentIndex = i;
+          nextSegmentOffset = remaining;
+          remaining = 0;
+          // Blank out the rest.
+          for (let j = i + 1; j < segments.length; j += 1) {
+            segments[j].node.nodeValue = "";
+          }
+          break;
+        }
+      }
+      segmentIndex = nextSegmentIndex;
+      segmentOffset = nextSegmentOffset;
+
+      container.querySelectorAll("li.typing-hidden,p.typing-hidden").forEach(revealIfReady);
+
+      lastBuiltHtml = next;
+    };
+
   const scheduleBuild = () => {
     if (buildTimer) {
       return;
     }
     const now = typeof performance !== "undefined" ? performance.now() : Date.now();
-    const minIntervalMs = 140;
-    const delay = Math.max(0, minIntervalMs - (now - lastBuildAt));
+    const delay = Math.max(0, BUILD_MIN_INTERVAL_MS - (now - lastBuildAt));
     buildTimer = window.setTimeout(() => {
       buildTimer = 0;
       lastBuildAt = typeof performance !== "undefined" ? performance.now() : Date.now();
@@ -426,270 +644,34 @@ function createRichTypewriter(container, { tickMs, onStart, onProgress, onDone }
     }, delay);
   };
 
-  const isLocalUrlPath = (value) => {
-    return (
-      typeof value === "string" &&
-      value.startsWith("/") &&
-      (value.startsWith("/api/") || value.startsWith("/assets/"))
-    );
-  };
-
-  const normalizeUrl = (raw) => {
-    const value = String(raw || "").trim();
-    if (!value) {
-      return "";
-    }
-    if (/^(?:javascript|vbscript):/i.test(value)) {
-      return "";
-    }
-    if (isLocalUrlPath(value)) {
-      return value;
-    }
-    try {
-      return new URL(value, HTML_BASE_URL).href;
-    } catch (_) {
-      return "";
-    }
-  };
-
-  const normalizeImageSrc = (raw) => {
-    const value = String(raw || "").trim();
-    if (!value) {
-      return "";
-    }
-    if (/^(?:javascript|vbscript):/i.test(value)) {
-      return "";
-    }
-    if (isLocalUrlPath(value)) {
-      return value;
-    }
-    if (/^data:/i.test(value)) {
-      return /^data:image\//i.test(value) ? value : "";
-    }
-    if (/^blob:/i.test(value)) {
-      return value;
-    }
-    return normalizeUrl(value);
-  };
-
-  const cloneRichNode = (node, outSegments) => {
-    if (node.nodeType === Node.TEXT_NODE) {
-      const full = node.nodeValue || "";
-      const textNode = document.createTextNode("");
-      outSegments.push({ node: textNode, fullText: full });
-      return textNode;
-    }
-
-    if (node.nodeType !== Node.ELEMENT_NODE) {
-      return null;
-    }
-
-    const source = node;
-    const tag = String(source.tagName || "").toLowerCase();
-    if (!tag || RICH_DROP_TAGS.has(tag)) {
-      return null;
-    }
-
-    // Avoid constantly reloading images while streaming (DOM rebuilds can restart requests).
-    // Images are injected once at the end when `markDone()` is called.
-    if (tag === "img" && !done) {
-      return null;
-    }
-
-    const el = document.createElement(tag);
-    Array.from(source.attributes || []).forEach((attr) => {
-      const name = String(attr.name || "");
-      const lower = name.toLowerCase();
-      if (!name || lower.startsWith("on") || lower === "style") {
-        return;
-      }
-      if (tag === "a" && lower === "href") {
-        return;
-      }
-      if (tag === "img" && (lower === "src" || lower === "srcset" || lower === "width" || lower === "height")) {
-        return;
-      }
-      el.setAttribute(name, String(attr.value || ""));
-    });
-
-    if (tag === "a") {
-      const href = normalizeUrl(source.getAttribute("href") || "");
-      if (href) {
-        el.setAttribute("href", href);
-        el.setAttribute("target", "_blank");
-        el.setAttribute("rel", "noopener noreferrer");
-      }
-    }
-
-    if (tag === "img") {
-      const src = normalizeImageSrc(source.getAttribute("src") || "");
-      if (src) {
-        el.setAttribute("src", src);
-      }
-      el.setAttribute("loading", "lazy");
-      el.setAttribute("decoding", "async");
-      if (!el.getAttribute("alt")) {
-        el.setAttribute("alt", "");
-      }
-      el.classList.add("rich-img", "rich-img--loading");
-    }
-
-    Array.from(source.childNodes || []).forEach((child) => {
-      const cloned = cloneRichNode(child, outSegments);
-      if (cloned) {
-        el.appendChild(cloned);
-      }
-    });
-    return el;
-  };
-
-  const wireRichContent = () => {
-    if (!container || !container.isConnected) {
-      return;
-    }
-
-    container.querySelectorAll("a[href]").forEach((a) => {
-      a.setAttribute("target", "_blank");
-      a.setAttribute("rel", "noopener noreferrer");
-    });
-
-    container.querySelectorAll("img").forEach((img) => {
-      const src = String(img.getAttribute("src") || "").trim();
-      if (!src) {
-        img.classList.add("rich-img--broken");
-        const fallback = document.createElement("div");
-        fallback.className = "rich-img-fallback";
-        fallback.textContent = "图片地址为空";
-        try {
-          img.insertAdjacentElement("afterend", fallback);
-        } catch (_) {
-          // ignore
+  const typeChars = (count) => {
+    let remaining = count;
+      while (remaining > 0 && segmentIndex < segments.length) {
+        const seg = segments[segmentIndex];
+        const available = seg.text.length - segmentOffset;
+        if (available <= 0) {
+          segmentIndex += 1;
+          segmentOffset = 0;
+          continue;
         }
-        return;
-      }
 
-      const onLoad = () => {
-        img.classList.remove("rich-img--loading");
-        img.classList.add("rich-img--loaded");
-      };
+      const step = Math.min(available, remaining);
+      const nextOffset = segmentOffset + step;
+      seg.node.nodeValue = seg.text.slice(0, nextOffset);
+      segmentOffset = nextOffset;
+      typedLen += step;
+        remaining -= step;
 
-      const onError = () => {
-        img.classList.add("rich-img--broken");
-        const fallback = document.createElement("div");
-        fallback.className = "rich-img-fallback";
-        fallback.textContent = "图片加载失败：";
-        const link = document.createElement("a");
-        link.textContent = src;
-        link.href = src;
-        link.target = "_blank";
-        link.rel = "noopener noreferrer";
-        fallback.appendChild(link);
-        try {
-          img.insertAdjacentElement("afterend", fallback);
-        } catch (_) {
-          // ignore
+        // Reveal placeholders when text arrives.
+        const parent = seg.node.parentElement;
+        if (parent) {
+          revealIfReady(parent.closest?.("p,li") || parent);
         }
-      };
 
-      img.addEventListener("load", onLoad, { once: true });
-      img.addEventListener("error", onError, { once: true });
-
-      if (img.complete) {
-        if (img.naturalWidth > 0) {
-          onLoad();
-        } else {
-          onError();
+        if (segmentOffset >= seg.text.length) {
+          segmentIndex += 1;
+          segmentOffset = 0;
         }
-      }
-    });
-  };
-
-  const buildFromPending = () => {
-    const sourceHtml = String(pendingHtml || "").trim();
-    const includeImages = Boolean(done);
-    if (!sourceHtml || (sourceHtml === lastBuiltHtml && includeImages === lastBuiltIncludeImages) || !container) {
-      return;
-    }
-
-    const parser = new DOMParser();
-    const documentHtml = /<html[\s>]/i.test(sourceHtml)
-      ? sourceHtml
-      : `<!doctype html><html><head></head><body>${sourceHtml}</body></html>`;
-    const doc = parser.parseFromString(documentHtml, "text/html");
-
-    const fragment = document.createDocumentFragment();
-    const nextSegments = [];
-    Array.from(doc.body?.childNodes || []).forEach((child) => {
-      const cloned = cloneRichNode(child, nextSegments);
-      if (cloned) {
-        fragment.appendChild(cloned);
-      }
-    });
-
-    container.replaceChildren(fragment);
-
-    // Hide placeholder list items during typing (avoid ugly blank bullets like in the screenshot).
-    if (!done) {
-      container.querySelectorAll("li").forEach((li) => {
-        if (shouldHidePlaceholder(li)) {
-          li.classList.add("typing-hidden");
-        }
-      });
-    } else {
-      container.querySelectorAll("li.typing-hidden").forEach((li) => li.classList.remove("typing-hidden"));
-    }
-
-    wireRichContent();
-
-    segments = nextSegments;
-    totalLen = segments.reduce((acc, seg) => acc + seg.fullText.length, 0);
-    typedLen = Math.max(0, Math.min(typedLen, totalLen));
-
-    let remaining = typedLen;
-    segmentIndex = 0;
-    segmentOffset = 0;
-    for (let i = 0; i < segments.length; i += 1) {
-      const seg = segments[i];
-      const take = Math.max(0, Math.min(remaining, seg.fullText.length));
-      seg.node.nodeValue = seg.fullText.slice(0, take);
-      remaining -= take;
-      if (take < seg.fullText.length) {
-        segmentIndex = i;
-        segmentOffset = take;
-        break;
-      }
-      segmentIndex = i + 1;
-      segmentOffset = 0;
-    }
-
-    lastBuiltHtml = sourceHtml;
-    lastBuiltIncludeImages = includeImages;
-    if (!startedDisplay) {
-      startedDisplay = true;
-      onStart?.();
-    }
-
-    if (done && typedLen >= totalLen) {
-      stop();
-      onDone?.();
-    }
-  };
-
-  const typeOneChar = () => {
-    if (typedLen >= totalLen) {
-      return;
-    }
-
-    while (segmentIndex < segments.length) {
-      const seg = segments[segmentIndex];
-      if (segmentOffset < seg.fullText.length) {
-        seg.node.nodeValue += seg.fullText[segmentOffset];
-        segmentOffset += 1;
-        typedLen += 1;
-        return;
-      }
-      segmentIndex += 1;
-      segmentOffset = 0;
     }
   };
 
@@ -706,10 +688,12 @@ function createRichTypewriter(container, { tickMs, onStart, onProgress, onDone }
       lastTickAt = timestamp;
     }
 
-    if (timestamp - lastTickAt >= Math.max(8, Number(tickMs) || 20)) {
+    const interval = Math.max(10, Number(tickMs) || 20);
+    if (timestamp - lastTickAt >= interval) {
       lastTickAt = timestamp;
+
       if (typedLen < totalLen) {
-        typeOneChar();
+        typeChars(charsPerTick());
         onProgress?.();
       } else if (done) {
         stop();
@@ -735,20 +719,31 @@ function createRichTypewriter(container, { tickMs, onStart, onProgress, onDone }
       if (!normalized) {
         return;
       }
+
+      if (!startedDisplay) {
+        startedDisplay = true;
+        onStart?.();
+      }
+
       pendingHtml = normalized;
       scheduleBuild();
       ensureRunning();
     },
-    markDone(nextFinalHtml) {
-      const normalized = String(nextFinalHtml || "").trim();
-      if (normalized) {
-        pendingHtml = normalized;
-        scheduleBuild();
-      }
-      done = true;
-      ensureRunning();
-    },
-    stop,
+      markDone(nextFinalHtml) {
+        const normalized = String(nextFinalHtml || "").trim();
+        if (!startedDisplay) {
+          startedDisplay = true;
+          onStart?.();
+        }
+        if (normalized) {
+          pendingHtml = normalized;
+          swapOnNextBuild = true;
+          scheduleBuild();
+        }
+        done = true;
+        ensureRunning();
+      },
+      stop,
   };
 }
 
@@ -764,12 +759,12 @@ async function submitComposerQuestion() {
   await askQuestion(question);
 }
 
-async function askQuestion(question) {
-  appendUserMessage(question);
-  const view = createAssistantMessage();
-  if (!view) {
-    return;
-  }
+  async function askQuestion(question) {
+    appendUserMessage(question);
+    const view = createAssistantMessage();
+    if (!view) {
+      return;
+    }
   syncUiState();
   scrollChatToBottom({ force: true });
 
@@ -781,13 +776,13 @@ async function askQuestion(question) {
   let streamAnswerHtml = "";
   let donePayload = null;
 
-  try {
-    const resp = await fetch("/api/ask-stream", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question }),
-      signal: state.abortController.signal,
-    });
+    try {
+      const resp = await fetch("/api/ask-stream", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question, conversation_id: state.conversationId }),
+        signal: state.abortController.signal,
+      });
 
     if (!resp.ok) {
       let errorPayload = null;
@@ -835,14 +830,15 @@ async function askQuestion(question) {
 
     const finalHtml = String(donePayload.answer_html || streamAnswerHtml || "").trim();
     const answerText = String(donePayload.answer_text || "").trim();
+
+    // Let the typewriter finish smoothly, while we keep rendering streamed rich HTML (tables/images).
+    // Once typing completes, we swap to final rich HTML with a fade.
     if (finalHtml) {
-      view.typer.setTargetHtml(finalHtml);
       view.typer.markDone(finalHtml);
     } else if (answerText) {
-      view.typer.setTargetHtml(plainTextToHtml(answerText));
-      view.typer.markDone();
+      view.typer.markDone(plainTextToHtml(answerText));
     } else {
-      view.typer.markDone();
+      view.typer.markDone("");
     }
     await refreshHealth();
   } catch (error) {

@@ -372,6 +372,34 @@ def download_images_to_local(
     return rewritten, localized
 
 
+def rewrite_img_sources(
+    answer_html: str,
+    src_map: dict[str, str] | None = None,
+    *,
+    placeholder_map: dict[str, str] | None = None,
+) -> str:
+    """Rewrite <img> src-like attributes based on an already-known mapping.
+
+    This is a pure HTML transform; it does not fetch any resources.
+    """
+
+    source = str(answer_html or "").strip()
+    if not source:
+        return ""
+    src_map = src_map or {}
+    placeholder_map = placeholder_map or {}
+    if not src_map and not placeholder_map:
+        return source
+
+    rewriter = _ImgSrcRewriter(src_map, placeholder_map=placeholder_map)
+    try:
+        rewriter.feed(source)
+        rewriter.close()
+        return rewriter.output().strip()
+    except Exception:
+        return source
+
+
 def inject_placeholder_img_sources(answer_html: str, placeholder_map: dict[str, str]) -> str:
     """Rewrite <img data-ima-bridge-media="..."> to point at local sources."""
 
@@ -385,3 +413,9 @@ def inject_placeholder_img_sources(answer_html: str, placeholder_map: dict[str, 
         return rewriter.output().strip()
     except Exception:
         return source
+
+
+def extract_img_srcs(answer_html: str) -> list[str]:
+    """Extract img src-like attributes from a fragment for fast checks/caching."""
+
+    return _extract_img_srcs(answer_html)
